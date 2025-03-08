@@ -279,8 +279,12 @@ def generate_available_slots(time_slots_data, num_days=14):
         for slot in time_slots_data:
             slot_day_lower = slot[0].lower()
             if slot_day_lower in DAY_MAP and DAY_MAP[slot_day_lower] == day_name:
-                start_datetime = datetime.datetime.combine(date, slot[1])
-                end_datetime = datetime.datetime.combine(date, slot[2])
+                # Criar datetime ingênuo
+                start_datetime_naive = datetime.datetime.combine(date, slot[1])
+                end_datetime_naive = datetime.datetime.combine(date, slot[2])
+                # Localizar para America/Sao_Paulo
+                start_datetime = LOCAL_TZ.localize(start_datetime_naive)
+                end_datetime = LOCAL_TZ.localize(end_datetime_naive)
                 available_slots.append((start_datetime, end_datetime))
     available_slots.sort(key=lambda x: x[0])
     logger.info(f"Slots disponíveis gerados: {len(available_slots)}")
@@ -340,6 +344,10 @@ async def create_schedule_entry(
     end_time_local = LOCAL_TZ.localize(end_time)
     start_time_utc = start_time_local.astimezone(pytz.UTC)
     end_time_utc = end_time_local.astimezone(pytz.UTC)
+
+    logger.debug(f"Antes da conversão - Start: {start_time}, End: {end_time}")
+    logger.debug(f"Localizado (UTC-3) - Start: {start_time_local}, End: {end_time_local}")
+    logger.debug(f"Convertido para UTC - Start: {start_time_utc}, End: {end_time_utc}")
 
     # Extrair o tipo da tarefa (ex.: [S], [A], [P]) se estiver presente no início
     task_type = ""
