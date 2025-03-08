@@ -1,0 +1,29 @@
+name: Notion Auto Scheduler
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_TAREFAS_ID: ${{ secrets.NOTION_DB_TAREFAS_ID }}
+          NOTION_DB_TOPICS_ID: ${{ secrets.NOTION_DB_TOPICS_ID }}
+          NOTION_DB_TIME_SLOTS_ID: ${{ secrets.NOTION_DB_TIME_SLOTS_ID }}
+          NOTION_DB_SCHEDULES_ID: ${{ secrets.NOTION_DB_SCHEDULES_ID }}
+        run: python script.py
