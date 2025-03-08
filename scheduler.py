@@ -5,7 +5,6 @@ import asyncio
 import logging
 import colorlog
 import json
-
 from dotenv import load_dotenv
 from notion_client import AsyncClient
 from logging.handlers import RotatingFileHandler
@@ -34,13 +33,21 @@ DAY_MAP = {
 }
 
 # Configuração do logger
-if not os.path.exists("logs"):
-    os.makedirs("logs")
-if not os.path.exists("caches"):
-    os.makedirs("caches")
+current_dir = os.path.dirname(os.path.abspath(__file__))
+logs_dir = os.path.join(current_dir, "logs")
+caches_dir = os.path.join(current_dir, "caches")
 
+# Criar os diretórios antes de qualquer operação com arquivos
+os.makedirs(logs_dir, exist_ok=True)
+os.makedirs(caches_dir, exist_ok=True)
+
+# Definir o caminho do arquivo de log APÓS criar o diretório
+log_file = os.path.join(
+    logs_dir, f"scheduler_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+)
+
+# Configurar o formatter e o handler
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-log_file = f"logs/scheduler_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=5)
 handler.setFormatter(log_formatter)
 
@@ -66,8 +73,8 @@ logger.addHandler(console_handler)
 notion = AsyncClient(auth=NOTION_API_KEY)
 
 # Arquivos de cache
-TOPICS_CACHE_FILE = "caches/topics_cache.json"
-TIME_SLOTS_CACHE_FILE = "caches/time_slots_cache.json"
+TOPICS_CACHE_FILE = os.path.join(caches_dir, "topics_cache.json")
+TIME_SLOTS_CACHE_FILE = os.path.join(caches_dir, "time_slots_cache.json")
 
 
 # Funções de cache
@@ -130,10 +137,18 @@ async def clear_schedules_db():
 async def get_tasks(topics_cache):
     tasks = []
     skipped_tasks = 0
+    task_ids_seen = set()  # Para atividades
+    topic_ids_seen = set()  # Para tópicos
     logger.debug("Consultando base de Atividades")
     response = await notion.databases.query(tasks_db_id)
+
     for activity in response["results"]:
         activity_id = activity["id"]
+        if activity_id in task_ids_seen:
+            logger.warning(f"Atividade duplicada detectada: {activity_id}, pulando")
+            continue
+        task_ids_seen.add(activity_id)
+
         name_key = "Professor"
         if (
             name_key not in activity["properties"]
@@ -155,7 +170,6 @@ async def get_tasks(topics_cache):
             continue
         due_date_str = due_date_prop["start"]
         due_date_naive = datetime.datetime.fromisoformat(due_date_str)
-        # Localizar explicitamente para America/Sao_Paulo se não tiver fuso
         due_date = (
             LOCAL_TZ.localize(due_date_naive)
             if due_date_naive.tzinfo is None
@@ -173,25 +187,31 @@ async def get_tasks(topics_cache):
 
         topics = await get_topics_for_activity(activity_id, topics_cache)
         if not topics:
-            task_id = activity_id
             tasks.append(
                 {
-                    "id": task_id,
+                    "id": activity_id,
                     "name": name,
                     "duration": duration,
                     "due_date": due_date,
                     "is_topic": False,
                 }
             )
+            logger.debug(f"Atividade sem tópicos adicionada: {name} ({activity_id})")
         else:
             for topic in topics:
+                topic_id = topic["id"]
+                if topic_id in topic_ids_seen:
+                    logger.debug(f"Tópico duplicado ignorado: {topic_id}")
+                    continue
+                topic_ids_seen.add(topic_id)
+
                 topic_name_key = "Name"
                 if (
                     topic_name_key not in topic["properties"]
                     or not topic["properties"][topic_name_key]["title"]
                 ):
                     logger.error(
-                        f"Propriedade '{topic_name_key}' não encontrada ou vazia para tópico {topic['id']}"
+                        f"Propriedade '{topic_name_key}' não encontrada ou vazia para tópico {topic_id}"
                     )
                     continue
                 topic_name = topic["properties"][topic_name_key]["title"][0][
@@ -200,22 +220,23 @@ async def get_tasks(topics_cache):
                 topic_duration_value = topic["properties"]["Duração"]["number"]
                 if topic_duration_value is None:
                     logger.warning(
-                        f"Duração não definida para tópico {topic_name} ({topic['id']}), pulando"
+                        f"Duração não definida para tópico {topic_name} ({topic_id}), pulando"
                     )
                     skipped_tasks += 1
                     continue
-                duration = topic_duration_value * 3600
-                topic_id = topic["id"]
+                topic_duration = topic_duration_value * 3600
                 tasks.append(
                     {
                         "id": topic_id,
                         "name": topic_name,
-                        "duration": duration,
+                        "duration": topic_duration,
                         "due_date": due_date,
                         "is_topic": True,
                         "activity_id": activity_id,
                     }
                 )
+                logger.debug(f"Tópico adicionado: {topic_name} ({topic_id})")
+
     logger.info(f"Tarefas carregadas: {len(tasks)}")
     return tasks, skipped_tasks
 
@@ -223,17 +244,24 @@ async def get_tasks(topics_cache):
 async def get_topics_for_activity(activity_id, topics_cache):
     if activity_id in topics_cache:
         logger.debug(f"Cache hit para tópicos da atividade {activity_id}")
-        return topics_cache[activity_id]
+        cached_topics = topics_cache[activity_id]
+        unique_topics = {topic["id"]: topic for topic in cached_topics}.values()
+        logger.debug(
+            f"Tópicos únicos no cache para {activity_id}: {len(unique_topics)}"
+        )
+        return list(unique_topics)
 
     filter = {
         "property": "ATIVIDADES",
         "relation": {"contains": activity_id},
     }
     logger.debug(f"Consultando tópicos para atividade {activity_id}")
-    response = await notion.databases.query(topics_db_id, filter=filter)
+    response = await notion.databases.query(database_id=topics_db_id, filter=filter)
     topics = response["results"]
-    topics_cache[activity_id] = topics
-    return topics
+    unique_topics = {topic["id"]: topic for topic in topics}.values()
+    topics_cache[activity_id] = list(unique_topics)
+    logger.debug(f"Tópicos únicos carregados para {activity_id}: {len(unique_topics)}")
+    return list(unique_topics)
 
 
 async def get_time_slots(time_slots_cache):
@@ -276,9 +304,15 @@ async def get_time_slots(time_slots_cache):
     return time_slots_data
 
 
-def generate_available_slots(time_slots_data, num_days=14):
+def generate_available_slots(time_slots_data, num_days=30):  # Alterado de 14 para 30
     available_slots = []
-    current_date = datetime.date.today()
+    current_datetime = datetime.datetime.now(LOCAL_TZ)
+    current_date = current_datetime.date()
+
+    logger.debug(
+        f"Gerando slots para {num_days} dias até {current_date + datetime.timedelta(days=num_days-1)}"
+    )
+
     for day in range(num_days):
         date = current_date + datetime.timedelta(days=day)
         day_name = date.strftime("%A")
@@ -287,11 +321,20 @@ def generate_available_slots(time_slots_data, num_days=14):
             if slot_day_lower in DAY_MAP and DAY_MAP[slot_day_lower] == day_name:
                 start_datetime_naive = datetime.datetime.combine(date, slot[1])
                 end_datetime_naive = datetime.datetime.combine(date, slot[2])
-                # Localizar para America/Sao_Paulo
                 start_datetime = LOCAL_TZ.localize(start_datetime_naive)
                 end_datetime = LOCAL_TZ.localize(end_datetime_naive)
+
+                if date == current_date and start_datetime <= current_datetime:
+                    logger.debug(
+                        f"Slot ignorado: {start_datetime} - {end_datetime} (passou ou em andamento)"
+                    )
+                    continue
+
                 available_slots.append((start_datetime, end_datetime))
     available_slots.sort(key=lambda x: x[0])
+    logger.debug(
+        f"Slots disponíveis: {[f'{slot[0]} - {slot[1]}' for slot in available_slots]}"
+    )
     logger.info(f"Slots disponíveis gerados: {len(available_slots)}")
     return available_slots
 
@@ -299,9 +342,29 @@ def generate_available_slots(time_slots_data, num_days=14):
 def schedule_tasks(tasks, available_slots):
     scheduled_parts = []
     original_slots = available_slots.copy()
-    for task in tasks:
-        remaining_duration = task["duration"]  # Correção: usar duration, não due_date
+    tasks_scheduled = set()
+    MAX_PART_DURATION = 7200  # 2 horas em segundos
+
+    # Ordenar tarefas por data limite (due_date) para priorizar as mais próximas
+    sorted_tasks = sorted(tasks, key=lambda x: x["due_date"])
+    logger.debug(
+        f"Tarefas ordenadas por data limite: {[task['name'] + ' (' + str(task['due_date']) + ')' for task in sorted_tasks]}"
+    )
+
+    for task in sorted_tasks:
+        task_id = task["id"]
+        if task_id in tasks_scheduled:
+            logger.debug(f"Tarefa {task['name']} ({task_id}) já agendada, pulando")
+            continue
+
+        remaining_duration = task["duration"]
         due_date_end = task["due_date"].replace(hour=23, minute=59, second=59)
+        task_parts = []
+
+        logger.debug(
+            f"Agendando tarefa {task['name']} ({task_id}) com duração {remaining_duration/3600}h, limite {due_date_end}"
+        )
+
         while remaining_duration > 0:
             scheduled = False
             for i, (slot_start, slot_end) in enumerate(available_slots):
@@ -312,11 +375,16 @@ def schedule_tasks(tasks, available_slots):
                 available_time = (slot_end - slot_start).total_seconds()
                 if available_time <= 0:
                     continue
-                part_duration = min(remaining_duration, available_time)
+
+                # Limitar a duração da parte a no máximo 2 horas
+                part_duration = min(
+                    remaining_duration, available_time, MAX_PART_DURATION
+                )
                 part_end = slot_start + datetime.timedelta(seconds=part_duration)
-                scheduled_parts.append(
+
+                task_parts.append(
                     {
-                        "task_id": task["id"],
+                        "task_id": task_id,
                         "start_time": slot_start,
                         "end_time": part_end,
                         "is_topic": task["is_topic"],
@@ -324,13 +392,19 @@ def schedule_tasks(tasks, available_slots):
                         "name": task["name"],
                     }
                 )
+                logger.debug(
+                    f"Parte agendada: {task['name']} ({task_id}) de {slot_start} a {part_end} ({part_duration/3600}h)"
+                )
                 remaining_duration -= part_duration
+
+                # Atualizar o slot disponível
                 if part_end < slot_end:
                     available_slots[i] = (part_end, slot_end)
                 else:
                     del available_slots[i]
                 scheduled = True
                 break
+
             if not scheduled:
                 logger.error(
                     f"Não foi possível agendar a tarefa {task['name']} antes da data limite {task['due_date']}"
@@ -338,12 +412,23 @@ def schedule_tasks(tasks, available_slots):
                 raise Exception(
                     f"Não foi possível agendar a tarefa {task['name']} antes da data limite {task['due_date']}"
                 )
+
+        scheduled_parts.extend(task_parts)
+        tasks_scheduled.add(task_id)
+
     logger.info(f"Partes agendadas: {len(scheduled_parts)}")
     return scheduled_parts, original_slots, available_slots
 
 
 async def create_schedule_entry(
-    task_id, start_time, end_time, is_topic, activity_id, task_name
+    task_id,
+    start_time,
+    end_time,
+    is_topic,
+    activity_id,
+    task_name,
+    part_number=None,
+    total_parts=None,
 ):
     start_time_local = (
         LOCAL_TZ.localize(start_time) if start_time.tzinfo is None else start_time
@@ -362,11 +447,15 @@ async def create_schedule_entry(
 
     # Garantir que o nome seja descritivo; fallback para "Tarefa sem nome" se vazio
     short_name = task_name if task_name else "Tarefa sem nome"
-    if len(short_name) > 19:
-        short_name = short_name[:16] + "..."
+    # Abreviar o nome para no máximo 12 caracteres (deixando espaço para "...N")
+    if len(short_name) > 12:
+        short_name = short_name[:12]
 
-    # Usar o tipo da tarefa como sufixo
-    name_with_suffix = f"{task_type} {short_name}" if task_type else f"{short_name}"
+    # Adicionar o número da parte se fornecido
+    if part_number is not None:
+        name_with_suffix = f"{task_type}{short_name}...{part_number}"
+    else:
+        name_with_suffix = f"{task_type}{short_name}"
 
     properties = {
         "Name": {"title": [{"type": "text", "text": {"content": name_with_suffix}}]},
@@ -393,8 +482,23 @@ async def create_schedule_entry(
 
 
 async def create_schedules_in_batches(scheduled_parts, batch_size=10):
-    for i in range(0, len(scheduled_parts), batch_size):
-        batch = scheduled_parts[i : i + batch_size]
+    # Agrupar partes por task_id para numerar corretamente
+    task_parts_count = {}
+    for part in scheduled_parts:
+        task_id = part["task_id"]
+        task_parts_count[task_id] = task_parts_count.get(task_id, 0) + 1
+
+    # Criar uma lista de partes com números
+    parts_with_numbers = []
+    task_part_counters = {}
+    for part in scheduled_parts:
+        task_id = part["task_id"]
+        task_part_counters[task_id] = task_part_counters.get(task_id, 0) + 1
+        part_number = task_part_counters[task_id]
+        parts_with_numbers.append((part, part_number))
+
+    for i in range(0, len(parts_with_numbers), batch_size):
+        batch = parts_with_numbers[i : i + batch_size]
         tasks = [
             create_schedule_entry(
                 part["task_id"],
@@ -403,8 +507,9 @@ async def create_schedules_in_batches(scheduled_parts, batch_size=10):
                 part["is_topic"],
                 part["activity_id"],
                 part["name"],
+                part_number=part_number,
             )
-            for part in batch
+            for part, part_number in batch
         ]
         await asyncio.gather(*tasks)
         logger.info(f"Lote de {len(batch)} entradas criado")
@@ -415,16 +520,11 @@ async def main():
     start_time = datetime.datetime.now()
     logger.info("Início da execução do script")
 
-    # Carregar caches
-    topics_cache = load_cache(TOPICS_CACHE_FILE, "topics_cache", max_age_days=1)
-    time_slots_cache = load_cache(
-        TIME_SLOTS_CACHE_FILE, "time_slots_cache", max_age_days=7
-    )
+    # Carregar caches (desativado temporariamente para testes)
+    topics_cache = {}
+    time_slots_cache = {"slots": []}
 
-    # Limpar a base de Cronogramas
     deleted_entries = await clear_schedules_db()
-
-    # Carregar dados assincronamente
     tasks_coro, time_slots_coro = get_tasks(topics_cache), get_time_slots(
         time_slots_cache
     )
@@ -432,24 +532,20 @@ async def main():
         tasks_coro, time_slots_coro
     )
 
-    # Gerar slots e agendar tarefas
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor() as pool:
         available_slots = await loop.run_in_executor(
             pool, generate_available_slots, time_slots_data
-        )
+        )  # Sem tasks
         scheduled_parts, original_slots, remaining_slots = await loop.run_in_executor(
             pool, schedule_tasks, tasks, available_slots
         )
 
-    # Criar entradas no cronograma em lotes
     insertions = await create_schedules_in_batches(scheduled_parts)
 
-    # Salvar caches
     save_cache(topics_cache, TOPICS_CACHE_FILE, "topics_cache")
     save_cache({"slots": time_slots_data}, TIME_SLOTS_CACHE_FILE, "time_slots_cache")
 
-    # Calcular horas livres restantes
     total_available_hours = sum(
         (slot[1] - slot[0]).total_seconds() / 3600 for slot in original_slots
     )
@@ -458,11 +554,8 @@ async def main():
         for part in scheduled_parts
     )
     free_hours = total_available_hours - total_used_hours
-
-    # Calcular tempo de execução
     execution_time = (datetime.datetime.now() - start_time).total_seconds()
 
-    # Estatísticas
     logger.info(
         f"""
         Estatísticas de execução:
