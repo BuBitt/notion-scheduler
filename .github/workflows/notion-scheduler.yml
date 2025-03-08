@@ -8,9 +8,9 @@ jobs:
     runs-on: ubuntu-latest
       
     steps:
-      - name: Install dependencies
-        run: |
-          sudo timedatectl set-timezone America/Sao_Paulo
+      #- name: Install dependencies 
+        #run: |
+          #sudo timedatectl set-timezone America/Sao_Paulo
 
       - name: Checkout repository
         uses: actions/checkout@v4

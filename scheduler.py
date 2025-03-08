@@ -65,7 +65,7 @@ logger.addHandler(console_handler)
 # Cliente Notion assíncrono
 notion = AsyncClient(auth=NOTION_API_KEY)
 
-# Arquivos de cache (caminhos relativos ao diretório de trabalho)
+# Arquivos de cache
 TOPICS_CACHE_FILE = "caches/topics_cache.json"
 TIME_SLOTS_CACHE_FILE = "caches/time_slots_cache.json"
 
@@ -154,7 +154,13 @@ async def get_tasks(topics_cache):
             skipped_tasks += 1
             continue
         due_date_str = due_date_prop["start"]
-        due_date = datetime.datetime.fromisoformat(due_date_str)
+        due_date_naive = datetime.datetime.fromisoformat(due_date_str)
+        # Localizar explicitamente para America/Sao_Paulo se não tiver fuso
+        due_date = (
+            LOCAL_TZ.localize(due_date_naive)
+            if due_date_naive.tzinfo is None
+            else due_date_naive
+        )
 
         duration_value = activity["properties"]["Duração"]["number"]
         if duration_value is None:
@@ -279,7 +285,6 @@ def generate_available_slots(time_slots_data, num_days=14):
         for slot in time_slots_data:
             slot_day_lower = slot[0].lower()
             if slot_day_lower in DAY_MAP and DAY_MAP[slot_day_lower] == day_name:
-                # Criar datetime ingênuo
                 start_datetime_naive = datetime.datetime.combine(date, slot[1])
                 end_datetime_naive = datetime.datetime.combine(date, slot[2])
                 # Localizar para America/Sao_Paulo
@@ -295,7 +300,7 @@ def schedule_tasks(tasks, available_slots):
     scheduled_parts = []
     original_slots = available_slots.copy()
     for task in tasks:
-        remaining_duration = task["duration"]
+        remaining_duration = task["duration"]  # Correção: usar duration, não due_date
         due_date_end = task["due_date"].replace(hour=23, minute=59, second=59)
         while remaining_duration > 0:
             scheduled = False
@@ -340,22 +345,20 @@ def schedule_tasks(tasks, available_slots):
 async def create_schedule_entry(
     task_id, start_time, end_time, is_topic, activity_id, task_name
 ):
-    start_time_local = LOCAL_TZ.localize(start_time)
-    end_time_local = LOCAL_TZ.localize(end_time)
+    start_time_local = (
+        LOCAL_TZ.localize(start_time) if start_time.tzinfo is None else start_time
+    )
+    end_time_local = (
+        LOCAL_TZ.localize(end_time) if end_time.tzinfo is None else end_time
+    )
     start_time_utc = start_time_local.astimezone(pytz.UTC)
     end_time_utc = end_time_local.astimezone(pytz.UTC)
-
-    logger.debug(f"Antes da conversão - Start: {start_time}, End: {end_time}")
-    logger.debug(f"Localizado (UTC-3) - Start: {start_time_local}, End: {end_time_local}")
-    logger.debug(f"Convertido para UTC - Start: {start_time_utc}, End: {end_time_utc}")
 
     # Extrair o tipo da tarefa (ex.: [S], [A], [P]) se estiver presente no início
     task_type = ""
     if task_name.startswith("[") and "]" in task_name:
-        task_type = task_name[: task_name.index("]") + 1]  # ex.: "[S]"
-        task_name = task_name[
-            task_name.index("]") + 1 :
-        ].strip()  # Remove o tipo do nome
+        task_type = task_name[: task_name.index("]") + 1]
+        task_name = task_name[task_name.index("]") + 1 :].strip()
 
     # Garantir que o nome seja descritivo; fallback para "Tarefa sem nome" se vazio
     short_name = task_name if task_name else "Tarefa sem nome"
