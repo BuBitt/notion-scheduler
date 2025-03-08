@@ -65,7 +65,7 @@ logger.addHandler(console_handler)
 # Cliente Notion assíncrono
 notion = AsyncClient(auth=NOTION_API_KEY)
 
-# Arquivos de cache
+# Arquivos de cache (caminhos relativos ao diretório de trabalho)
 TOPICS_CACHE_FILE = "caches/topics_cache.json"
 TIME_SLOTS_CACHE_FILE = "caches/time_slots_cache.json"
 
@@ -79,7 +79,6 @@ def load_cache(file_path, cache_name, max_age_days=1):
                 with open(file_path, "r") as f:
                     cache = json.load(f)
                 if cache_name == "time_slots_cache":
-                    # Converter strings de volta para datetime.time
                     cache["slots"] = [
                         (
                             slot[0],
@@ -100,7 +99,6 @@ def load_cache(file_path, cache_name, max_age_days=1):
 def save_cache(cache, file_path, cache_name):
     try:
         if cache_name == "time_slots_cache":
-            # Converter datetime.time para strings antes de salvar
             serializable_cache = {
                 "slots": [
                     (slot[0], slot[1].isoformat(), slot[2].isoformat())
@@ -343,13 +341,24 @@ async def create_schedule_entry(
     start_time_utc = start_time_local.astimezone(pytz.UTC)
     end_time_utc = end_time_local.astimezone(pytz.UTC)
 
-    short_name = task_name.split(" - ")[0] if " - " in task_name else task_name
+    # Extrair o tipo da tarefa (ex.: [S], [A], [P]) se estiver presente no início
+    task_type = ""
+    if task_name.startswith("[") and "]" in task_name:
+        task_type = task_name[: task_name.index("]") + 1]  # ex.: "[S]"
+        task_name = task_name[
+            task_name.index("]") + 1 :
+        ].strip()  # Remove o tipo do nome
+
+    # Garantir que o nome seja descritivo; fallback para "Tarefa sem nome" se vazio
+    short_name = task_name if task_name else "Tarefa sem nome"
     if len(short_name) > 19:
         short_name = short_name[:16] + "..."
-    name_with_time = f"{short_name:<19} - {start_time.strftime('%Hh')}"
+
+    # Usar o tipo da tarefa como sufixo
+    name_with_suffix = f"{task_type} {short_name}" if task_type else f"{short_name}"
 
     properties = {
-        "Name": {"title": [{"type": "text", "text": {"content": name_with_time}}]},
+        "Name": {"title": [{"type": "text", "text": {"content": name_with_suffix}}]},
         "Agendamento": {
             "date": {
                 "start": start_time_utc.isoformat(),
@@ -365,7 +374,7 @@ async def create_schedule_entry(
     else:
         properties["ATIVIDADES"] = {"relation": [{"id": task_id}]}
 
-    logger.debug(f"Criando entrada no cronograma: {name_with_time}")
+    logger.debug(f"Criando entrada no cronograma: {name_with_suffix}")
     await notion.pages.create(
         parent={"database_id": schedules_db_id},
         properties=properties,

@@ -6,6 +6,9 @@ on:
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    env:
+      TZ: America/Sao_Paulo
+      
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -15,15 +18,39 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
 
-      - name: Run script
+      - name: Cache Notion data
+        id: cache-notion
+        uses: actions/cache@v3
+        with:
+          path: caches/
+          key: ${{ runner.os }}-notion-cache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-notion-cache-
+
+      - name: Run Scheduler
         env:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DB_TAREFAS_ID: ${{ secrets.NOTION_DB_TAREFAS_ID }}
           NOTION_DB_TOPICS_ID: ${{ secrets.NOTION_DB_TOPICS_ID }}
           NOTION_DB_TIME_SLOTS_ID: ${{ secrets.NOTION_DB_TIME_SLOTS_ID }}
           NOTION_DB_SCHEDULES_ID: ${{ secrets.NOTION_DB_SCHEDULES_ID }}
-        run: python script.py
+        run: python scheduler.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: scheduler-logs
+          path: logs/
