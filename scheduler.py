@@ -4,12 +4,12 @@ import datetime
 import asyncio
 import logging
 import colorlog
+import json
 
 from dotenv import load_dotenv
 from notion_client import AsyncClient
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
-
 
 # Configuração inicial
 load_dotenv()
@@ -36,6 +36,8 @@ DAY_MAP = {
 # Configuração do logger
 if not os.path.exists("logs"):
     os.makedirs("logs")
+if not os.path.exists("caches"):
+    os.makedirs("caches")
 
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 log_file = f"logs/scheduler_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -63,6 +65,58 @@ logger.addHandler(console_handler)
 # Cliente Notion assíncrono
 notion = AsyncClient(auth=NOTION_API_KEY)
 
+# Arquivos de cache
+TOPICS_CACHE_FILE = "caches/topics_cache.json"
+TIME_SLOTS_CACHE_FILE = "caches/time_slots_cache.json"
+
+
+# Funções de cache
+def load_cache(file_path, cache_name, max_age_days=1):
+    if os.path.exists(file_path):
+        mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
+        if (datetime.datetime.now() - mod_time).days <= max_age_days:
+            try:
+                with open(file_path, "r") as f:
+                    cache = json.load(f)
+                if cache_name == "time_slots_cache":
+                    # Converter strings de volta para datetime.time
+                    cache["slots"] = [
+                        (
+                            slot[0],
+                            datetime.time.fromisoformat(slot[1]),
+                            datetime.time.fromisoformat(slot[2]),
+                        )
+                        for slot in cache["slots"]
+                    ]
+                logger.info(
+                    f"Cache {cache_name} carregado de {file_path} com {len(cache if cache_name == 'topics_cache' else cache['slots'])} itens"
+                )
+                return cache
+            except Exception as e:
+                logger.error(f"Erro ao carregar cache {cache_name}: {e}")
+    return {} if cache_name == "topics_cache" else {"slots": []}
+
+
+def save_cache(cache, file_path, cache_name):
+    try:
+        if cache_name == "time_slots_cache":
+            # Converter datetime.time para strings antes de salvar
+            serializable_cache = {
+                "slots": [
+                    (slot[0], slot[1].isoformat(), slot[2].isoformat())
+                    for slot in cache["slots"]
+                ]
+            }
+        else:
+            serializable_cache = cache
+        with open(file_path, "w") as f:
+            json.dump(serializable_cache, f)
+        logger.info(
+            f"Cache {cache_name} salvo em {file_path} com {len(cache if cache_name == 'topics_cache' else cache['slots'])} itens"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao salvar cache {cache_name}: {e}")
+
 
 async def clear_schedules_db():
     logger.info("Iniciando limpeza da base de Cronogramas")
@@ -75,9 +129,8 @@ async def clear_schedules_db():
     return len(pages)
 
 
-async def get_tasks():
+async def get_tasks(topics_cache):
     tasks = []
-    cache = {}
     skipped_tasks = 0
     logger.debug("Consultando base de Atividades")
     response = await notion.databases.query(tasks_db_id)
@@ -114,11 +167,9 @@ async def get_tasks():
             continue
         duration = duration_value * 3600
 
-        topics = await get_topics_for_activity(activity_id, cache)
+        topics = await get_topics_for_activity(activity_id, topics_cache)
         if not topics:
             task_id = activity_id
-            if name not in cache:
-                cache[name] = task_id
             tasks.append(
                 {
                     "id": task_id,
@@ -151,8 +202,6 @@ async def get_tasks():
                     continue
                 duration = topic_duration_value * 3600
                 topic_id = topic["id"]
-                if topic_name not in cache:
-                    cache[topic_name] = topic_id
                 tasks.append(
                     {
                         "id": topic_id,
@@ -164,23 +213,33 @@ async def get_tasks():
                     }
                 )
     logger.info(f"Tarefas carregadas: {len(tasks)}")
-    return tasks, cache, skipped_tasks
+    return tasks, skipped_tasks
 
 
-async def get_topics_for_activity(activity_id, cache):
+async def get_topics_for_activity(activity_id, topics_cache):
+    if activity_id in topics_cache:
+        logger.debug(f"Cache hit para tópicos da atividade {activity_id}")
+        return topics_cache[activity_id]
+
     filter = {
         "property": "ATIVIDADES",
         "relation": {"contains": activity_id},
     }
     logger.debug(f"Consultando tópicos para atividade {activity_id}")
     response = await notion.databases.query(topics_db_id, filter=filter)
-    return response["results"]
+    topics = response["results"]
+    topics_cache[activity_id] = topics
+    return topics
 
 
-async def get_time_slots():
-    time_slots_data = []
+async def get_time_slots(time_slots_cache):
+    if time_slots_cache.get("slots"):
+        logger.debug("Usando cache para intervalos de tempo")
+        return time_slots_cache["slots"]
+
     logger.debug("Consultando base de Intervalos de Tempo")
     response = await notion.databases.query(time_slots_db_id)
+    time_slots_data = []
     for slot in response["results"]:
         day_key = "Dia da Semana"
         if (
@@ -207,6 +266,8 @@ async def get_time_slots():
         end_time = datetime.time.fromisoformat(end_time_str)
 
         time_slots_data.append((day_of_week, start_time, end_time))
+
+    time_slots_cache["slots"] = time_slots_data
     logger.info(f"Intervalos de tempo carregados: {len(time_slots_data)}")
     return time_slots_data
 
@@ -230,7 +291,7 @@ def generate_available_slots(time_slots_data, num_days=14):
 
 def schedule_tasks(tasks, available_slots):
     scheduled_parts = []
-    original_slots = available_slots.copy()  # Para cálculo de horas livres
+    original_slots = available_slots.copy()
     for task in tasks:
         remaining_duration = task["duration"]
         due_date_end = task["due_date"].replace(hour=23, minute=59, second=59)
@@ -283,11 +344,9 @@ async def create_schedule_entry(
     end_time_utc = end_time_local.astimezone(pytz.UTC)
 
     short_name = task_name.split(" - ")[0] if " - " in task_name else task_name
-    if len(short_name) > 19:  # 19 para caber "- HHh" e totalizar 25
+    if len(short_name) > 19:
         short_name = short_name[:16] + "..."
-    name_with_time = (
-        f"{short_name:<19} - {start_time.strftime('%Hh')}"  # Comprimento fixo de 25
-    )
+    name_with_time = f"{short_name:<19} - {start_time.strftime('%Hh')}"
 
     properties = {
         "Name": {"title": [{"type": "text", "text": {"content": name_with_time}}]},
@@ -336,12 +395,20 @@ async def main():
     start_time = datetime.datetime.now()
     logger.info("Início da execução do script")
 
+    # Carregar caches
+    topics_cache = load_cache(TOPICS_CACHE_FILE, "topics_cache", max_age_days=1)
+    time_slots_cache = load_cache(
+        TIME_SLOTS_CACHE_FILE, "time_slots_cache", max_age_days=7
+    )
+
     # Limpar a base de Cronogramas
     deleted_entries = await clear_schedules_db()
 
     # Carregar dados assincronamente
-    tasks_coro, time_slots_coro = get_tasks(), get_time_slots()
-    (tasks, cache, skipped_tasks), time_slots_data = await asyncio.gather(
+    tasks_coro, time_slots_coro = get_tasks(topics_cache), get_time_slots(
+        time_slots_cache
+    )
+    (tasks, skipped_tasks), time_slots_data = await asyncio.gather(
         tasks_coro, time_slots_coro
     )
 
@@ -357,6 +424,10 @@ async def main():
 
     # Criar entradas no cronograma em lotes
     insertions = await create_schedules_in_batches(scheduled_parts)
+
+    # Salvar caches
+    save_cache(topics_cache, TOPICS_CACHE_FILE, "topics_cache")
+    save_cache({"slots": time_slots_data}, TIME_SLOTS_CACHE_FILE, "time_slots_cache")
 
     # Calcular horas livres restantes
     total_available_hours = sum(
