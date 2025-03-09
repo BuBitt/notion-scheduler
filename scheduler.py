@@ -37,16 +37,13 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 logs_dir = os.path.join(current_dir, "logs")
 caches_dir = os.path.join(current_dir, "caches")
 
-# Criar os diretórios antes de qualquer operação com arquivos
 os.makedirs(logs_dir, exist_ok=True)
 os.makedirs(caches_dir, exist_ok=True)
 
-# Definir o caminho do arquivo de log APÓS criar o diretório
 log_file = os.path.join(
     logs_dir, f"scheduler_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 )
 
-# Configurar o formatter e o handler
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=5)
 handler.setFormatter(log_formatter)
@@ -88,9 +85,14 @@ def load_cache(file_path, cache_name, max_age_days=1):
                 if cache_name == "time_slots_cache":
                     cache["slots"] = [
                         (
-                            slot[0],
-                            datetime.time.fromisoformat(slot[1]),
-                            datetime.time.fromisoformat(slot[2]),
+                            slot[0],  # day_of_week (pode ser None)
+                            datetime.time.fromisoformat(slot[1]),  # start_time
+                            datetime.time.fromisoformat(slot[2]),  # end_time
+                            (
+                                datetime.date.fromisoformat(slot[3])
+                                if slot[3]
+                                else None
+                            ),  # exception_date
                         )
                         for slot in cache["slots"]
                     ]
@@ -108,7 +110,12 @@ def save_cache(cache, file_path, cache_name):
         if cache_name == "time_slots_cache":
             serializable_cache = {
                 "slots": [
-                    (slot[0], slot[1].isoformat(), slot[2].isoformat())
+                    (
+                        slot[0],  # day_of_week (pode ser None)
+                        slot[1].isoformat(),  # start_time
+                        slot[2].isoformat(),  # end_time
+                        slot[3].isoformat() if slot[3] else None,  # exception_date
+                    )
                     for slot in cache["slots"]
                 ]
             }
@@ -150,18 +157,16 @@ async def get_tasks(topics_cache):
         task_ids_seen.add(activity_id)
 
         name_key = "Professor"
-        if (
-            name_key not in activity["properties"]
-            or not activity["properties"][name_key]["title"]
-        ):
+        properties = activity.get("properties", {})
+        title_prop = properties.get(name_key)
+        if not title_prop or "title" not in title_prop or not title_prop["title"]:
             logger.error(
                 f"Propriedade '{name_key}' não encontrada ou vazia para atividade {activity_id}"
             )
             continue
+        name = title_prop["title"][0]["plain_text"]
 
-        name = activity["properties"][name_key]["title"][0]["plain_text"]
-
-        due_date_prop = activity["properties"].get("Data de Entrega", {}).get("date")
+        due_date_prop = properties.get("Data de Entrega", {}).get("date")
         if due_date_prop is None:
             logger.warning(
                 f"Data de Entrega não definida para atividade {name} ({activity_id}), pulando"
@@ -169,21 +174,21 @@ async def get_tasks(topics_cache):
             skipped_tasks += 1
             continue
         due_date_str = due_date_prop["start"]
-        due_date_naive = datetime.datetime.fromisoformat(due_date_str)
+        due_date_naive = datetime.datetime.fromisoformat(due_date_str.replace("Z", ""))
         due_date = (
             LOCAL_TZ.localize(due_date_naive)
             if due_date_naive.tzinfo is None
             else due_date_naive
         )
 
-        duration_value = activity["properties"]["Duração"]["number"]
+        duration_value = properties.get("Duração", {}).get("number")
         if duration_value is None:
             logger.warning(
                 f"Duração não definida para atividade {name} ({activity_id}), pulando"
             )
             skipped_tasks += 1
             continue
-        duration = duration_value * 3600
+        duration = duration_value * 3600  # Convertendo horas para segundos
 
         topics = await get_topics_for_activity(activity_id, topics_cache)
         if not topics:
@@ -206,25 +211,30 @@ async def get_tasks(topics_cache):
                 topic_ids_seen.add(topic_id)
 
                 topic_name_key = "Name"
+                topic_properties = topic.get("properties", {})
+                topic_title_prop = topic_properties.get(topic_name_key)
                 if (
-                    topic_name_key not in topic["properties"]
-                    or not topic["properties"][topic_name_key]["title"]
+                    not topic_title_prop
+                    or "title" not in topic_title_prop
+                    or not topic_title_prop["title"]
                 ):
                     logger.error(
                         f"Propriedade '{topic_name_key}' não encontrada ou vazia para tópico {topic_id}"
                     )
                     continue
-                topic_name = topic["properties"][topic_name_key]["title"][0][
-                    "plain_text"
-                ]
-                topic_duration_value = topic["properties"]["Duração"]["number"]
+                topic_name = topic_title_prop["title"][0]["plain_text"]
+
+                topic_duration_value = topic_properties.get("Duração", {}).get("number")
                 if topic_duration_value is None:
                     logger.warning(
                         f"Duração não definida para tópico {topic_name} ({topic_id}), pulando"
                     )
                     skipped_tasks += 1
                     continue
-                topic_duration = topic_duration_value * 3600
+                topic_duration = (
+                    topic_duration_value * 3600
+                )  # Convertendo horas para segundos
+
                 tasks.append(
                     {
                         "id": topic_id,
@@ -264,6 +274,20 @@ async def get_topics_for_activity(activity_id, topics_cache):
     return list(unique_topics)
 
 
+async def update_time_slot_day(notion, slot_id, day_of_week):
+    """Atualiza a coluna 'Dia da Semana' de um slot no Notion."""
+    try:
+        await notion.pages.update(
+            page_id=slot_id,
+            properties={"Dia da Semana": {"select": {"name": day_of_week}}},
+        )
+        logger.info(
+            f"Atualizado 'Dia da Semana' para '{day_of_week}' no slot {slot_id}"
+        )
+    except Exception as e:
+        logger.error(f"Erro ao atualizar 'Dia da Semana' para o slot {slot_id}: {e}")
+
+
 async def get_time_slots(time_slots_cache):
     if time_slots_cache.get("slots"):
         logger.debug("Usando cache para intervalos de tempo")
@@ -272,23 +296,57 @@ async def get_time_slots(time_slots_cache):
     logger.debug("Consultando base de Intervalos de Tempo")
     response = await notion.databases.query(time_slots_db_id)
     time_slots_data = []
-    for slot in response["results"]:
-        day_key = "Dia da Semana"
-        if (
-            day_key not in slot["properties"]
-            or not slot["properties"][day_key]["select"]
-        ):
-            logger.error(
-                f"Propriedade '{day_key}' não encontrada ou vazia para slot {slot['id']}"
-            )
-            continue
-        day_of_week = slot["properties"][day_key]["select"]["name"]
 
-        start_time_rich = slot["properties"]["Hora de Início"]["rich_text"]
-        end_time_rich = slot["properties"]["Hora de Fim"]["rich_text"]
+    for slot in response["results"]:
+        slot_id = slot["id"]
+        day_key = "Dia da Semana"
+        properties = slot.get("properties", {})
+        day_of_week = None
+        exception_date = None
+
+        # Buscar a coluna "Exceções"
+        exception_date_prop = properties.get("Exceções", {}).get("date")
+        if exception_date_prop and exception_date_prop["start"]:
+            exception_date_naive = datetime.datetime.fromisoformat(
+                exception_date_prop["start"].replace("Z", "")
+            ).date()
+            exception_date = exception_date_naive
+            # Inferir o dia da semana a partir da data de exceção
+            day_of_week = exception_date.strftime("%A")
+            day_of_week_portuguese = {
+                "Monday": "Segunda",
+                "Tuesday": "Terça",
+                "Wednesday": "Quarta",
+                "Thursday": "Quinta",
+                "Friday": "Sexta",
+                "Saturday": "Sábado",
+                "Sunday": "Domingo",
+            }.get(day_of_week, None)
+
+        # Verificar "Dia da Semana" apenas se não houver exceção
+        if not exception_date:
+            day_prop = properties.get(day_key)
+            if not day_prop or "select" not in day_prop or not day_prop["select"]:
+                logger.error(
+                    f"Propriedade '{day_key}' não encontrada ou vazia para slot {slot_id} sem exceção"
+                )
+                continue
+            day_of_week = day_prop["select"]["name"]
+        else:
+            # Se houver exceção e "Dia da Semana" estiver vazio, atualizar a base
+            day_prop = properties.get(day_key)
+            if not day_prop or "select" not in day_prop or not day_prop["select"]:
+                if day_of_week_portuguese:
+                    await update_time_slot_day(notion, slot_id, day_of_week_portuguese)
+                    day_of_week = day_of_week_portuguese
+            else:
+                day_of_week = day_prop["select"]["name"]
+
+        start_time_rich = properties.get("Hora de Início", {}).get("rich_text")
+        end_time_rich = properties.get("Hora de Fim", {}).get("rich_text")
 
         if not start_time_rich or not end_time_rich:
-            logger.error(f"Hora de Início ou Fim vazia para slot {slot['id']}")
+            logger.error(f"Hora de Início ou Fim vazia para slot {slot_id}")
             continue
 
         start_time_str = start_time_rich[0]["plain_text"]
@@ -297,17 +355,21 @@ async def get_time_slots(time_slots_cache):
         start_time = datetime.time.fromisoformat(start_time_str)
         end_time = datetime.time.fromisoformat(end_time_str)
 
-        time_slots_data.append((day_of_week, start_time, end_time))
+        time_slots_data.append((day_of_week, start_time, end_time, exception_date))
 
     time_slots_cache["slots"] = time_slots_data
     logger.info(f"Intervalos de tempo carregados: {len(time_slots_data)}")
     return time_slots_data
 
 
-def generate_available_slots(time_slots_data, num_days=30):  # Alterado de 14 para 30
+def generate_available_slots(time_slots_data, num_days=30):
     available_slots = []
     current_datetime = datetime.datetime.now(LOCAL_TZ)
     current_date = current_datetime.date()
+
+    # Contadores para estatísticas
+    exception_days = set()  # Conjunto para dias únicos com exceções
+    exception_slots_count = 0  # Contador de slots gerados a partir de exceções
 
     logger.debug(
         f"Gerando slots para {num_days} dias até {current_date + datetime.timedelta(days=num_days-1)}"
@@ -316,11 +378,23 @@ def generate_available_slots(time_slots_data, num_days=30):  # Alterado de 14 pa
     for day in range(num_days):
         date = current_date + datetime.timedelta(days=day)
         day_name = date.strftime("%A")
-        for slot in time_slots_data:
-            slot_day_lower = slot[0].lower()
-            if slot_day_lower in DAY_MAP and DAY_MAP[slot_day_lower] == day_name:
-                start_datetime_naive = datetime.datetime.combine(date, slot[1])
-                end_datetime_naive = datetime.datetime.combine(date, slot[2])
+
+        # Filtrar slots com exceções para essa data
+        exception_slots = [
+            (slot[1], slot[2])  # (start_time, end_time)
+            for slot in time_slots_data
+            if slot[3] and slot[3] == date
+        ]
+
+        if exception_slots:
+            # Se houver exceções, usar apenas esses slots
+            logger.debug(
+                f"Exceção encontrada para {date}: {len(exception_slots)} slots"
+            )
+            exception_days.add(date)
+            for start_time, end_time in exception_slots:
+                start_datetime_naive = datetime.datetime.combine(date, start_time)
+                end_datetime_naive = datetime.datetime.combine(date, end_time)
                 start_datetime = LOCAL_TZ.localize(start_datetime_naive)
                 end_datetime = LOCAL_TZ.localize(end_datetime_naive)
 
@@ -331,12 +405,35 @@ def generate_available_slots(time_slots_data, num_days=30):  # Alterado de 14 pa
                     continue
 
                 available_slots.append((start_datetime, end_datetime))
+                exception_slots_count += 1
+        else:
+            # Usar slots regulares apenas se não houver exceções
+            for slot in time_slots_data:
+                slot_day_lower = slot[0].lower() if slot[0] else None
+                if (
+                    slot_day_lower
+                    and slot_day_lower in DAY_MAP
+                    and DAY_MAP[slot_day_lower] == day_name
+                ):
+                    start_datetime_naive = datetime.datetime.combine(date, slot[1])
+                    end_datetime_naive = datetime.datetime.combine(date, slot[2])
+                    start_datetime = LOCAL_TZ.localize(start_datetime_naive)
+                    end_datetime = LOCAL_TZ.localize(end_datetime_naive)
+
+                    if date == current_date and start_datetime <= current_datetime:
+                        logger.debug(
+                            f"Slot ignorado: {start_datetime} - {end_datetime} (passou ou em andamento)"
+                        )
+                        continue
+
+                    available_slots.append((start_datetime, end_datetime))
+
     available_slots.sort(key=lambda x: x[0])
     logger.debug(
         f"Slots disponíveis: {[f'{slot[0]} - {slot[1]}' for slot in available_slots]}"
     )
     logger.info(f"Slots disponíveis gerados: {len(available_slots)}")
-    return available_slots
+    return available_slots, len(exception_days), exception_slots_count
 
 
 def schedule_tasks(tasks, available_slots):
@@ -377,14 +474,11 @@ def schedule_tasks(tasks, available_slots):
                 if available_time <= 0:
                     continue
 
-                # Tentar agendar um bloco de 2 horas, ou o que sobrar se for menos
                 part_duration = min(
                     remaining_duration, MAX_PART_DURATION, available_time
                 )
-                # Se o tempo restante for menor que 2h mas maior que 1h, usar o máximo disponível até 2h
                 if remaining_duration < MAX_PART_DURATION and remaining_duration > 3600:
                     part_duration = min(remaining_duration, available_time)
-                # Se for exatamente 1h ou menos, manter como 1h
                 elif remaining_duration <= 3600:
                     part_duration = min(remaining_duration, available_time)
 
@@ -405,9 +499,7 @@ def schedule_tasks(tasks, available_slots):
                 )
                 remaining_duration -= part_duration
 
-                # Atualizar o slot disponível
                 if part_end < slot_end:
-                    # Se sobrar espaço, verificar se é suficiente para um descanso
                     remaining_slot_time = (slot_end - part_end).total_seconds()
                     if remaining_slot_time >= REST_DURATION and remaining_duration > 0:
                         rest_end = part_end + datetime.timedelta(seconds=REST_DURATION)
@@ -457,8 +549,10 @@ async def create_schedule_entry(
     end_time_local = (
         LOCAL_TZ.localize(end_time) if end_time.tzinfo is None else end_time
     )
-    start_time_utc = start_time_local.astimezone(pytz.UTC)
-    end_time_utc = end_time_local.astimezone(pytz.UTC)
+
+    # Remover o offset do fuso horário, mantendo apenas a data/hora local
+    start_time_no_offset = start_time_local.replace(tzinfo=None).isoformat()
+    end_time_no_offset = end_time_local.replace(tzinfo=None).isoformat()
 
     # Extrair o tipo da tarefa (ex.: [S], [A], [P]) se estiver presente no início
     task_type = ""
@@ -482,8 +576,9 @@ async def create_schedule_entry(
         "Name": {"title": [{"type": "text", "text": {"content": name_with_suffix}}]},
         "Agendamento": {
             "date": {
-                "start": start_time_utc.isoformat(),
-                "end": end_time_utc.isoformat(),
+                "start": start_time_no_offset,  # Sem offset
+                "end": end_time_no_offset,  # Sem offset
+                "time_zone": LOCAL_TZ.zone,  # Fuso horário explícito
             }
         },
     }
@@ -503,13 +598,11 @@ async def create_schedule_entry(
 
 
 async def create_schedules_in_batches(scheduled_parts, batch_size=10):
-    # Agrupar partes por task_id para numerar corretamente
     task_parts_count = {}
     for part in scheduled_parts:
         task_id = part["task_id"]
         task_parts_count[task_id] = task_parts_count.get(task_id, 0) + 1
 
-    # Criar uma lista de partes com números
     parts_with_numbers = []
     task_part_counters = {}
     for part in scheduled_parts:
@@ -541,7 +634,6 @@ async def main():
     start_time = datetime.datetime.now()
     logger.info("Início da execução do script")
 
-    # Carregar caches (desativado temporariamente para testes)
     topics_cache = {}
     time_slots_cache = {"slots": []}
 
@@ -555,9 +647,10 @@ async def main():
 
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor() as pool:
-        available_slots = await loop.run_in_executor(
+        result = await loop.run_in_executor(
             pool, generate_available_slots, time_slots_data
-        )  # Sem tasks
+        )
+        available_slots, exception_days_count, exception_slots_count = result
         scheduled_parts, original_slots, remaining_slots = await loop.run_in_executor(
             pool, schedule_tasks, tasks, available_slots
         )
@@ -570,11 +663,11 @@ async def main():
     total_available_hours = sum(
         (slot[1] - slot[0]).total_seconds() / 3600 for slot in original_slots
     )
-    total_used_hours = sum(
+    committed_hours = sum(
         (part["end_time"] - part["start_time"]).total_seconds() / 3600
         for part in scheduled_parts
     )
-    free_hours = total_available_hours - total_used_hours
+    free_hours = total_available_hours - committed_hours
     execution_time = (datetime.datetime.now() - start_time).total_seconds()
 
     logger.info(
@@ -583,7 +676,10 @@ async def main():
         • Tarefas carregadas: {len(tasks)}
         • Tarefas puladas: {skipped_tasks}
         • Inserções no banco de dados: {insertions}
+        • Horas comprometidas: {int(committed_hours)}h
         • Horas livres restantes: {int(free_hours)}h (de {int(total_available_hours)}h totais)
+        • Dias com exceções: {exception_days_count}
+        • Slots distribuídos por exceções: {exception_slots_count}
         • Tempo de execução: {execution_time:.2f} segundos
         • Entradas removidas do cronograma: {deleted_entries}"""
     )
