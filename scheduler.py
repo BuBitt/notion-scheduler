@@ -344,8 +344,9 @@ def schedule_tasks(tasks, available_slots):
     original_slots = available_slots.copy()
     tasks_scheduled = set()
     MAX_PART_DURATION = 7200  # 2 horas em segundos
+    REST_DURATION = 3600  # 1 hora de descanso em segundos
 
-    # Ordenar tarefas por data limite (due_date) para priorizar as mais próximas
+    # Ordenar tarefas por data limite
     sorted_tasks = sorted(tasks, key=lambda x: x["due_date"])
     logger.debug(
         f"Tarefas ordenadas por data limite: {[task['name'] + ' (' + str(task['due_date']) + ')' for task in sorted_tasks]}"
@@ -376,10 +377,17 @@ def schedule_tasks(tasks, available_slots):
                 if available_time <= 0:
                     continue
 
-                # Limitar a duração da parte a no máximo 2 horas
+                # Tentar agendar um bloco de 2 horas, ou o que sobrar se for menos
                 part_duration = min(
-                    remaining_duration, available_time, MAX_PART_DURATION
+                    remaining_duration, MAX_PART_DURATION, available_time
                 )
+                # Se o tempo restante for menor que 2h mas maior que 1h, usar o máximo disponível até 2h
+                if remaining_duration < MAX_PART_DURATION and remaining_duration > 3600:
+                    part_duration = min(remaining_duration, available_time)
+                # Se for exatamente 1h ou menos, manter como 1h
+                elif remaining_duration <= 3600:
+                    part_duration = min(remaining_duration, available_time)
+
                 part_end = slot_start + datetime.timedelta(seconds=part_duration)
 
                 task_parts.append(
@@ -399,9 +407,22 @@ def schedule_tasks(tasks, available_slots):
 
                 # Atualizar o slot disponível
                 if part_end < slot_end:
-                    available_slots[i] = (part_end, slot_end)
+                    # Se sobrar espaço, verificar se é suficiente para um descanso
+                    remaining_slot_time = (slot_end - part_end).total_seconds()
+                    if remaining_slot_time >= REST_DURATION and remaining_duration > 0:
+                        rest_end = part_end + datetime.timedelta(seconds=REST_DURATION)
+                        logger.debug(
+                            f"Descanso inserido de {part_end} a {rest_end} (1h)"
+                        )
+                        if rest_end < slot_end:
+                            available_slots[i] = (rest_end, slot_end)
+                        else:
+                            del available_slots[i]
+                    else:
+                        available_slots[i] = (part_end, slot_end)
                 else:
                     del available_slots[i]
+
                 scheduled = True
                 break
 
