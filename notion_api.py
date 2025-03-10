@@ -145,6 +145,9 @@ async def get_tasks(topics_cache, logger):
     return tasks, skipped_tasks
 
 
+import unicodedata
+
+
 async def get_topics_for_activity(activity_id, topics_cache, logger):
     if activity_id in topics_cache:
         logger.debug(f"Cache hit para tópicos da atividade {activity_id}")
@@ -164,7 +167,40 @@ async def get_topics_for_activity(activity_id, topics_cache, logger):
         database_id=Config.TOPICS_DB_ID, filter=filter
     )
     topics = response["results"]
-    unique_topics = {topic["id"]: topic for topic in topics}.values()
+    filtered_topics = []
+
+    for topic in topics:
+        topic_id = topic["id"]
+        properties = topic.get("properties", {})
+
+        # Verificar o campo Status do tópico
+        status_prop = properties.get("Status", {}).get("status")
+        logger.debug(f"Status do tópico {topic_id}: {status_prop}")
+        if status_prop:
+            # Normalizar o status removendo acentos e convertendo para minúsculas
+            status_name = (
+                unicodedata.normalize("NFKD", status_prop["name"])
+                .encode("ASCII", "ignore")
+                .decode("ASCII")
+                .lower()
+            )
+            if status_name == "concluido":
+                topic_name_key = "Name"
+                title_prop = properties.get(topic_name_key)
+                name = (
+                    title_prop["title"][0]["plain_text"]
+                    if title_prop and "title" in title_prop and title_prop["title"]
+                    else "Sem Nome"
+                )
+                logger.info(
+                    f"Tópico '{name}' ({topic_id}) marcado como 'Concluido', ignorado no agendamento"
+                )
+                continue
+
+        # Se não for concluído, adicionar à lista de tópicos filtrados
+        filtered_topics.append(topic)
+
+    unique_topics = {topic["id"]: topic for topic in filtered_topics}.values()
     topics_cache[activity_id] = list(unique_topics)
     logger.debug(f"Tópicos únicos carregados para {activity_id}: {len(unique_topics)}")
     return list(unique_topics)

@@ -2,17 +2,21 @@ import datetime
 from config import Config
 
 
-def generate_available_slots(time_slots_data, logger):
+import datetime
+from config import Config
+
+
+def generate_available_slots(time_slots_data, logger, days_to_schedule):
     available_slots = []
     current_datetime = datetime.datetime.now(Config.LOCAL_TZ)
     current_date = current_datetime.date()
-    end_date = current_date + datetime.timedelta(days=Config.DAYS_TO_SCHEDULE - 1)
+    end_date = current_date + datetime.timedelta(days=days_to_schedule - 1)
 
     # Dicionários para separar slots por dia
     exception_slots_by_day = {}
     regular_slots_by_day = {}
 
-    logger.debug(f"Gerando slots para {Config.DAYS_TO_SCHEDULE} dias até {end_date}")
+    logger.debug(f"Gerando slots para {days_to_schedule} dias até {end_date}")
 
     # Classificar os slots em regulares e exceções
     for slot in time_slots_data:
@@ -43,7 +47,7 @@ def generate_available_slots(time_slots_data, logger):
     exception_days = set()
     exception_slots_count = 0
 
-    for day in range(Config.DAYS_TO_SCHEDULE):
+    for day in range(days_to_schedule):
         date = current_date + datetime.timedelta(days=day)
         day_name_en = date.strftime("%A")
 
@@ -92,9 +96,13 @@ def schedule_tasks(tasks, available_slots, logger):
     MAX_PART_DURATION = Config.MAX_PART_DURATION_HOURS * 3600
     REST_DURATION = Config.REST_DURATION_HOURS * 3600
 
+    # Ordenar tarefas por due_date crescente (mais próximo primeiro)
     sorted_tasks = sorted(tasks, key=lambda x: x["due_date"])
+    logger.info(
+        "Tarefas ordenadas por prioridade: do due_date mais próximo ao mais distante"
+    )
     logger.debug(
-        f"Tarefas ordenadas por data limite: {[task['name'] + ' (' + str(task['due_date']) + ')' for task in sorted_tasks]}"
+        f"Tarefas ordenadas: {[task['name'] + ' (' + str(task['due_date']) + ')' for task in sorted_tasks]}"
     )
 
     for task in sorted_tasks:
@@ -108,8 +116,8 @@ def schedule_tasks(tasks, available_slots, logger):
         due_date_date = task["due_date"].date()  # Data limite sem horário
         task_parts = []
 
-        logger.debug(
-            f"Agendando tarefa {task['name']} ({task_id}) com duração {remaining_duration/3600}h, limite {due_date_end}"
+        logger.info(
+            f"Agendando tarefa {task['name']} ({task_id}) com alta prioridade - Due Date: {due_date_end}, Duração: {remaining_duration/3600}h"
         )
 
         while remaining_duration > 0:

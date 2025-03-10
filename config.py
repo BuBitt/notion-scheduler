@@ -19,7 +19,7 @@ class Config:
     LOCAL_TZ = pytz.timezone("America/Sao_Paulo")
 
     # Configurações de logging
-    LOG_LEVEL = "DEBUG"  # Opções: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+    LOG_LEVEL = "INFO"  # Opções: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
     LOG_TO_FILE = True  # Ativar/desativar log em arquivo
     LOG_TO_CONSOLE = True  # Ativar/desativar log no console
     LOG_FILE_MAX_SIZE_MB = 5  # Tamanho máximo do arquivo de log em MB
