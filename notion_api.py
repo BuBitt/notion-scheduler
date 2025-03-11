@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import unicodedata
 from notion_client import AsyncClient
 from config import Config
 
@@ -37,9 +38,9 @@ async def get_tasks(topics_cache, logger):
 
         properties = activity.get("properties", {})
 
-        # Verificar o campo Status
-        status_prop = properties.get("Status", {}).get("status")
-        if status_prop and status_prop["name"] == "Concluído":
+        # Verificar o campo Status (fórmula)
+        status_prop = properties.get("Status", {}).get("formula", {}).get("string")
+        if status_prop and status_prop == "✅ Concluído":
             name_key = "Professor"
             title_prop = properties.get(name_key)
             name = (
@@ -48,7 +49,7 @@ async def get_tasks(topics_cache, logger):
                 else "Sem Nome"
             )
             logger.info(
-                f"Atividade '{name}' ({activity_id}) marcada como 'Concluído', ignorada no agendamento"
+                f"Atividade '{name}' ({activity_id}) marcada como '✅ Concluído', ignorada no agendamento"
             )
             continue
 
@@ -145,9 +146,6 @@ async def get_tasks(topics_cache, logger):
     return tasks, skipped_tasks
 
 
-import unicodedata
-
-
 async def get_topics_for_activity(activity_id, topics_cache, logger):
     if activity_id in topics_cache:
         logger.debug(f"Cache hit para tópicos da atividade {activity_id}")
@@ -173,29 +171,21 @@ async def get_topics_for_activity(activity_id, topics_cache, logger):
         topic_id = topic["id"]
         properties = topic.get("properties", {})
 
-        # Verificar o campo Status do tópico
-        status_prop = properties.get("Status", {}).get("status")
+        # Verificar o campo Status (fórmula)
+        status_prop = properties.get("Status", {}).get("formula", {}).get("string")
         logger.debug(f"Status do tópico {topic_id}: {status_prop}")
-        if status_prop:
-            # Normalizar o status removendo acentos e convertendo para minúsculas
-            status_name = (
-                unicodedata.normalize("NFKD", status_prop["name"])
-                .encode("ASCII", "ignore")
-                .decode("ASCII")
-                .lower()
+        if status_prop and status_prop == "✅ Concluído":
+            topic_name_key = "Name"
+            title_prop = properties.get(topic_name_key)
+            name = (
+                title_prop["title"][0]["plain_text"]
+                if title_prop and "title" in title_prop and title_prop["title"]
+                else "Sem Nome"
             )
-            if status_name == "concluido":
-                topic_name_key = "Name"
-                title_prop = properties.get(topic_name_key)
-                name = (
-                    title_prop["title"][0]["plain_text"]
-                    if title_prop and "title" in title_prop and title_prop["title"]
-                    else "Sem Nome"
-                )
-                logger.info(
-                    f"Tópico '{name}' ({topic_id}) marcado como 'Concluido', ignorado no agendamento"
-                )
-                continue
+            logger.info(
+                f"Tópico '{name}' ({topic_id}) marcado como '✅ Concluído', ignorado no agendamento"
+            )
+            continue
 
         # Se não for concluído, adicionar à lista de tópicos filtrados
         filtered_topics.append(topic)
