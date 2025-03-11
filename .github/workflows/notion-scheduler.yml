@@ -48,7 +48,7 @@ jobs:
           NOTION_DB_TOPICS_ID: ${{ secrets.NOTION_DB_TOPICS_ID }}
           NOTION_DB_TIME_SLOTS_ID: ${{ secrets.NOTION_DB_TIME_SLOTS_ID }}
           NOTION_DB_SCHEDULES_ID: ${{ secrets.NOTION_DB_SCHEDULES_ID }}
-        run: python scheduler.py
+        run: python main.py
 
       - name: Upload logs
         if: always()
