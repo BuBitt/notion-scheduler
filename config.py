@@ -2,43 +2,53 @@ import os
 from dotenv import load_dotenv
 import pytz
 
-# Carrega variáveis de ambiente do .env
 load_dotenv()
 
 
-# Configurações gerais
 class Config:
-    # Credenciais do Notion (obtidas do .env)
+    # Credenciais do Notion
     NOTION_API_KEY = os.getenv("NOTION_API_KEY")
     TASKS_DB_ID = os.getenv("NOTION_DB_TAREFAS_ID")
     TOPICS_DB_ID = os.getenv("NOTION_DB_TOPICS_ID")
     TIME_SLOTS_DB_ID = os.getenv("NOTION_DB_TIME_SLOTS_ID")
     SCHEDULES_DB_ID = os.getenv("NOTION_DB_SCHEDULES_ID")
 
-    # Fuso horário
+    # Validação
+    REQUIRED_ENV_VARS = {
+        "NOTION_API_KEY": NOTION_API_KEY,
+        "NOTION_DB_TAREFAS_ID": TASKS_DB_ID,
+        "NOTION_DB_TOPICS_ID": TOPICS_DB_ID,
+        "NOTION_DB_TIME_SLOTS_ID": TIME_SLOTS_DB_ID,
+        "NOTION_DB_SCHEDULES_ID": SCHEDULES_DB_ID,
+    }
+    for var_name, var_value in REQUIRED_ENV_VARS.items():
+        if not var_value:
+            raise ValueError(
+                f"Variável de ambiente obrigatória '{var_name}' não configurada no .env"
+            )
+
+    # Timezone
     LOCAL_TZ = pytz.timezone("America/Sao_Paulo")
 
-    # Configurações de logging
-    LOG_LEVEL = "INFO"  # Opções: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
-    LOG_TO_FILE = True  # Ativar/desativar log em arquivo
-    LOG_TO_CONSOLE = True  # Ativar/desativar log no console
-    LOG_FILE_MAX_SIZE_MB = 5  # Tamanho máximo do arquivo de log em MB
-    LOG_BACKUP_COUNT = 5  # Número de arquivos de backup
+    # Logging
+    LOG_LEVEL = "DEBUG"
+    LOG_TO_FILE = True
+    LOG_TO_CONSOLE = True
+    LOG_FILE_MAX_SIZE_MB = 5
+    LOG_BACKUP_COUNT = 5
 
-    # Configurações de cache
-    USE_CACHE = False  # Ativar/desativar uso de cache
-    CACHE_MAX_AGE_DAYS = 1  # Tempo máximo que o cache é considerado válido (em dias)
+    # Cache
+    USE_CACHE = False
+    CACHE_MAX_AGE_DAYS = 1
 
-    # Configurações de agendamento
-    SCHEDULE_CLEAR_DB = (
-        True  # Ativar/desativar limpeza da base de cronogramas no início
-    )
-    SCHEDULE_BATCH_SIZE = 15  # Tamanho do lote para inserções no Notion
-    MAX_PART_DURATION_HOURS = 2  # Duração máxima de cada parte (em horas)
-    REST_DURATION_HOURS = 1  # Duração do descanso entre partes (em horas)
-    DAYS_TO_SCHEDULE = 30  # Número de dias para gerar slots disponíveis
+    # Scheduling
+    SCHEDULE_CLEAR_DB = True
+    SCHEDULE_BATCH_SIZE = 15
+    MAX_PART_DURATION_HOURS = 2
+    REST_DURATION_HOURS = 1
+    DAYS_TO_SCHEDULE = 30
 
-    # Mapeamento de dias
+    # Day mapping (English as standard)
     DAY_MAP = {
         "segunda": "Monday",
         "terça": "Tuesday",
