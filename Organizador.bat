@@ -1,12 +1,10 @@
 @echo off
-setlocal
-
-:: Obtém o diretório do script
-set "SCRIPT_DIR=%~dp0"
-
-:: Executa o Python do ambiente virtual
-"%SCRIPT_DIR%venv\Scripts\python.exe" "%SCRIPT_DIR%scheduler.py"
-
-echo.
-echo Pressione qualquer tecla para fechar...
-pause >nul
+echo Iniciando o script de exportação do cronograma...
+python main.py
+if %ERRORLEVEL% NEQ 0 (
+    echo Erro ao executar o script!
+    pause
+) else (
+    echo Script concluído com sucesso! Arquivos gerados na pasta 'export'.
+    pause
+)

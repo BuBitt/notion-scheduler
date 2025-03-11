@@ -4,20 +4,17 @@ import colorlog
 from logging.handlers import RotatingFileHandler
 from config import Config
 import datetime
+from pathlib import Path
 
 
-def setup_logger():
-    """Configura o logger com saída para arquivo e console.
+def setup_logger() -> logging.Logger:
+    """Configura o logger com saída para arquivo e console."""
+    current_dir = Path(__file__).parent
+    logs_dir = current_dir / "logs"
+    logs_dir.mkdir(exist_ok=True)
 
-    Returns:
-        logging.Logger: Logger configurado.
-    """
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    logs_dir = os.path.join(current_dir, "logs")
-    os.makedirs(logs_dir, exist_ok=True)
-
-    log_file = os.path.join(
-        logs_dir, f"scheduler_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_file = (
+        logs_dir / f"scheduler_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
 
     logger = logging.getLogger("SchedulerLogger")

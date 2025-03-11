@@ -1,16 +1,23 @@
 import datetime
+from typing import List, Tuple, Dict
 from config import Config
 
 
-def generate_available_slots(time_slots_data, logger, days_to_schedule):
+def generate_available_slots(
+    time_slots_data: List[Tuple[str, datetime.time, datetime.time, datetime.date]],
+    logger,
+    days_to_schedule: int,
+) -> Tuple[List[Tuple[datetime.datetime, datetime.datetime]], int, int]:
     """Gera slots disponíveis com base nos dados de time slots."""
     available_slots = []
     current_datetime = datetime.datetime.now(Config.LOCAL_TZ)
     current_date = current_datetime.date()
     end_date = current_date + datetime.timedelta(days=days_to_schedule - 1)
 
-    exception_slots_by_day = {}
-    regular_slots_by_day = {}
+    exception_slots_by_day: Dict[
+        datetime.date, List[Tuple[datetime.datetime, datetime.datetime]]
+    ] = {}
+    regular_slots_by_day: Dict[str, List[Tuple[datetime.time, datetime.time]]] = {}
 
     for slot in time_slots_data:
         day_name, start_time, end_time, exception_date = slot
@@ -27,9 +34,9 @@ def generate_available_slots(time_slots_data, logger, days_to_schedule):
                 )
             )
         elif day_name_en:
-            regular_slots_by_day[day_name_en] = regular_slots_by_day.get(
-                day_name_en, []
-            ) + [(start_time, end_time)]
+            regular_slots_by_day.setdefault(day_name_en, []).append(
+                (start_time, end_time)
+            )
 
     exception_days = set()
     exception_slots_count = 0
@@ -60,14 +67,83 @@ def generate_available_slots(time_slots_data, logger, days_to_schedule):
     return available_slots, len(exception_days), exception_slots_count
 
 
-def schedule_tasks(tasks, available_slots, logger):
+def schedule_part(
+    task: Dict,
+    available_slots: List[Tuple[datetime.datetime, datetime.datetime]],
+    remaining_duration: float,
+    due_date_end: datetime.datetime,
+    logger,
+) -> Tuple[List[Dict], float, bool]:
+    """Agenda uma parte de uma tarefa em um slot disponível."""
+    MAX_PART_DURATION = Config.MAX_PART_DURATION_HOURS * 3600
+    REST_DURATION = Config.REST_DURATION_HOURS * 3600
+    task_parts = []
+    scheduled = False
+
+    for i, (slot_start, slot_end) in enumerate(available_slots):
+        if (
+            slot_start.date() == due_date_end.date()
+            or slot_end.date() == due_date_end.date()
+        ):
+            continue
+        if slot_start >= due_date_end:
+            continue
+        if slot_end > due_date_end:
+            slot_end = due_date_end
+
+        available_time = (slot_end - slot_start).total_seconds()
+        if available_time <= 0:
+            continue
+
+        part_duration = min(remaining_duration, MAX_PART_DURATION, available_time)
+        part_end = slot_start + datetime.timedelta(seconds=part_duration)
+
+        task_parts.append(
+            {
+                "task_id": task["id"],
+                "start_time": slot_start,
+                "end_time": part_end,
+                "is_topic": task["is_topic"],
+                "activity_id": task.get("activity_id"),
+                "name": task["name"],
+            }
+        )
+        remaining_duration -= part_duration
+
+        if part_end < slot_end:
+            remaining_slot_time = (slot_end - part_end).total_seconds()
+            if remaining_slot_time >= REST_DURATION and remaining_duration > 0:
+                rest_end = part_end + datetime.timedelta(seconds=REST_DURATION)
+                if rest_end < slot_end:
+                    available_slots[i] = (rest_end, slot_end)
+                else:
+                    del available_slots[i]
+            else:
+                available_slots[i] = (part_end, slot_end)
+        else:
+            del available_slots[i]
+
+        scheduled = True
+        break
+
+    return task_parts, remaining_duration, scheduled
+
+
+def schedule_tasks(
+    tasks: List[Dict],
+    available_slots: List[Tuple[datetime.datetime, datetime.datetime]],
+    logger,
+) -> Tuple[
+    List[Dict],
+    List[Tuple[datetime.datetime, datetime.datetime]],
+    List[Tuple[datetime.datetime, datetime.datetime]],
+    List[Dict],
+]:
     """Agenda tarefas em slots disponíveis, retornando partes não agendadas."""
     scheduled_parts = []
     original_slots = available_slots.copy()
     tasks_scheduled = set()
     unscheduled_tasks = []
-    MAX_PART_DURATION = Config.MAX_PART_DURATION_HOURS * 3600
-    REST_DURATION = Config.REST_DURATION_HOURS * 3600
 
     sorted_tasks = sorted(tasks, key=lambda x: x["due_date"])
     for task in sorted_tasks:
@@ -77,59 +153,13 @@ def schedule_tasks(tasks, available_slots, logger):
 
         remaining_duration = task["duration"]
         due_date_end = task["due_date"].replace(hour=23, minute=59, second=59)
-        due_date_date = task["due_date"].date()
         task_parts = []
 
         while remaining_duration > 0:
-            scheduled = False
-            for i, (slot_start, slot_end) in enumerate(available_slots):
-                if (
-                    slot_start.date() == due_date_date
-                    or slot_end.date() == due_date_date
-                ):
-                    continue
-                if slot_start >= due_date_end:
-                    continue
-                if slot_end > due_date_end:
-                    slot_end = due_date_end
-
-                available_time = (slot_end - slot_start).total_seconds()
-                if available_time <= 0:
-                    continue
-
-                part_duration = min(
-                    remaining_duration, MAX_PART_DURATION, available_time
-                )
-                part_end = slot_start + datetime.timedelta(seconds=part_duration)
-
-                task_parts.append(
-                    {
-                        "task_id": task_id,
-                        "start_time": slot_start,
-                        "end_time": part_end,
-                        "is_topic": task["is_topic"],
-                        "activity_id": task.get("activity_id"),
-                        "name": task["name"],
-                    }
-                )
-                remaining_duration -= part_duration
-
-                if part_end < slot_end:
-                    remaining_slot_time = (slot_end - part_end).total_seconds()
-                    if remaining_slot_time >= REST_DURATION and remaining_duration > 0:
-                        rest_end = part_end + datetime.timedelta(seconds=REST_DURATION)
-                        if rest_end < slot_end:
-                            available_slots[i] = (rest_end, slot_end)
-                        else:
-                            del available_slots[i]
-                    else:
-                        available_slots[i] = (part_end, slot_end)
-                else:
-                    del available_slots[i]
-
-                scheduled = True
-                break
-
+            parts, remaining_duration, scheduled = schedule_part(
+                task, available_slots, remaining_duration, due_date_end, logger
+            )
+            task_parts.extend(parts)
             if not scheduled:
                 logger.warning(
                     f"Could not schedule task '{task['name']}' before {task['due_date']}"

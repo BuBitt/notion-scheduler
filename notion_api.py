@@ -2,13 +2,14 @@ import asyncio
 from functools import wraps
 import datetime
 import unicodedata
+from typing import List, Dict, Any, Tuple, Optional
 from notion_client import AsyncClient
 from config import Config
 
 notion = AsyncClient(auth=Config.NOTION_API_KEY)
 
 
-def retry(max_attempts=3, delay=1):
+def retry(max_attempts: int = 3, delay: int = 1):
     """Decorator para retentativas em caso de falha em chamadas à API."""
 
     def decorator(func):
@@ -29,16 +30,19 @@ def retry(max_attempts=3, delay=1):
     return decorator
 
 
+def parse_date(date_str: str) -> datetime.datetime:
+    """Converte string de data para datetime com timezone."""
+    naive_date = datetime.datetime.fromisoformat(date_str.replace("Z", ""))
+    return (
+        Config.LOCAL_TZ.localize(naive_date)
+        if naive_date.tzinfo is None
+        else naive_date
+    )
+
+
 @retry()
-async def clear_schedules_db(logger):
-    """Limpa a base de cronogramas arquivando todas as entradas.
-
-    Args:
-        logger: Objeto de logging.
-
-    Returns:
-        int: Número de entradas removidas.
-    """
+async def clear_schedules_db(logger) -> int:
+    """Limpa a base de cronogramas arquivando todas as entradas."""
     if not Config.SCHEDULE_CLEAR_DB:
         logger.info("Limpeza da base de cronogramas desativada")
         return 0
@@ -53,16 +57,10 @@ async def clear_schedules_db(logger):
 
 
 @retry()
-async def get_tasks(topics_cache, logger):
-    """Carrega tarefas não concluídas do Notion.
-
-    Args:
-        topics_cache (dict): Cache de tópicos por atividade.
-        logger: Objeto de logging.
-
-    Returns:
-        tuple: (lista de tarefas, número de tarefas puladas).
-    """
+async def get_tasks(
+    topics_cache: Dict[str, List[Dict]], logger
+) -> Tuple[List[Dict], int]:
+    """Carrega tarefas não concluídas do Notion."""
     tasks = []
     skipped_tasks = 0
     task_ids_seen = set()
@@ -99,13 +97,7 @@ async def get_tasks(topics_cache, logger):
             )
             skipped_tasks += 1
             continue
-        due_date_str = due_date_prop["start"]
-        due_date_naive = datetime.datetime.fromisoformat(due_date_str.replace("Z", ""))
-        due_date = (
-            Config.LOCAL_TZ.localize(due_date_naive)
-            if due_date_naive.tzinfo is None
-            else due_date_naive
-        )
+        due_date = parse_date(due_date_prop["start"])
 
         duration_value = properties.get("Duração", {}).get("number")
         if duration_value is None:
@@ -176,17 +168,10 @@ async def get_tasks(topics_cache, logger):
 
 
 @retry()
-async def get_topics_for_activity(activity_id, topics_cache, logger):
-    """Obtém tópicos relacionados a uma atividade, excluindo concluídos.
-
-    Args:
-        activity_id (str): ID da atividade.
-        topics_cache (dict): Cache de tópicos.
-        logger: Objeto de logging.
-
-    Returns:
-        list: Lista de tópicos únicos.
-    """
+async def get_topics_for_activity(
+    activity_id: str, topics_cache: Dict[str, List[Dict]], logger
+) -> List[Dict]:
+    """Obtém tópicos relacionados a uma atividade, excluindo concluídos."""
     if activity_id in topics_cache:
         logger.debug(f"Cache encontrado para tópicos da atividade {activity_id}")
         cached_topics = topics_cache[activity_id]
@@ -214,14 +199,8 @@ async def get_topics_for_activity(activity_id, topics_cache, logger):
 
 
 @retry()
-async def update_time_slot_day(slot_id, day_of_week, logger):
-    """Atualiza o dia da semana de um slot de tempo.
-
-    Args:
-        slot_id (str): ID do slot.
-        day_of_week (str): Nome do dia da semana.
-        logger: Objeto de logging.
-    """
+async def update_time_slot_day(slot_id: str, day_of_week: str, logger) -> None:
+    """Atualiza o dia da semana de um slot de tempo."""
     try:
         await notion.pages.update(
             page_id=slot_id,
@@ -235,16 +214,10 @@ async def update_time_slot_day(slot_id, day_of_week, logger):
 
 
 @retry()
-async def get_time_slots(time_slots_cache, logger):
-    """Carrega slots de tempo do Notion.
-
-    Args:
-        time_slots_cache (dict): Cache de slots de tempo.
-        logger: Objeto de logging.
-
-    Returns:
-        list: Lista de tuplas (dia, início, fim, data de exceção).
-    """
+async def get_time_slots(
+    time_slots_cache: Dict[str, List], logger
+) -> List[Tuple[str, datetime.time, datetime.time, Optional[datetime.date]]]:
+    """Carrega slots de tempo do Notion."""
     if time_slots_cache.get("slots"):
         logger.debug("Usando cache para intervalos de tempo")
         return time_slots_cache["slots"]
@@ -261,20 +234,13 @@ async def get_time_slots(time_slots_cache, logger):
 
         exception_date_prop = properties.get("Exceções", {}).get("date")
         if exception_date_prop and exception_date_prop["start"]:
-            exception_date_naive = datetime.datetime.fromisoformat(
+            exception_date = datetime.datetime.fromisoformat(
                 exception_date_prop["start"].replace("Z", "")
             ).date()
-            exception_date = exception_date_naive
             day_of_week = exception_date.strftime("%A")
             day_of_week_portuguese = {
-                "Monday": "Segunda",
-                "Tuesday": "Terça",
-                "Wednesday": "Quarta",
-                "Thursday": "Quinta",
-                "Friday": "Sexta",
-                "Saturday": "Sábado",
-                "Sunday": "Domingo",
-            }.get(day_of_week, None)
+                v: k.capitalize() for k, v in Config.DAY_MAP.items()
+            }.get(day_of_week)
 
         if not exception_date:
             day_prop = properties.get("Dia da Semana")
@@ -299,10 +265,8 @@ async def get_time_slots(time_slots_cache, logger):
             logger.error(f"Hora de início ou fim ausente para slot {slot_id}")
             continue
 
-        start_time_str = start_time_rich[0]["plain_text"]
-        end_time_str = end_time_rich[0]["plain_text"]
-        start_time = datetime.time.fromisoformat(start_time_str)
-        end_time = datetime.time.fromisoformat(end_time_str)
+        start_time = datetime.time.fromisoformat(start_time_rich[0]["plain_text"])
+        end_time = datetime.time.fromisoformat(end_time_rich[0]["plain_text"])
 
         time_slots_data.append((day_of_week, start_time, end_time, exception_date))
 
@@ -313,27 +277,16 @@ async def get_time_slots(time_slots_cache, logger):
 
 @retry()
 async def create_schedule_entry(
-    task_id,
-    start_time,
-    end_time,
-    is_topic,
-    activity_id,
-    task_name,
+    task_id: str,
+    start_time: datetime.datetime,
+    end_time: datetime.datetime,
+    is_topic: bool,
+    activity_id: Optional[str],
+    task_name: str,
     logger,
-    part_number=None,
-):
-    """Cria uma entrada no cronograma do Notion.
-
-    Args:
-        task_id (str): ID da tarefa ou tópico.
-        start_time (datetime): Hora de início.
-        end_time (datetime): Hora de fim.
-        is_topic (bool): Indica se é um tópico.
-        activity_id (str): ID da atividade relacionada (se aplicável).
-        task_name (str): Nome da tarefa.
-        logger: Objeto de logging.
-        part_number (int, optional): Número da parte, se dividida.
-    """
+    part_number: Optional[int] = None,
+) -> None:
+    """Cria uma entrada no cronograma do Notion."""
     start_time_local = (
         Config.LOCAL_TZ.localize(start_time)
         if start_time.tzinfo is None
@@ -384,16 +337,8 @@ async def create_schedule_entry(
 
 
 @retry()
-async def create_schedules_in_batches(scheduled_parts, logger):
-    """Cria entradas no cronograma em lotes.
-
-    Args:
-        scheduled_parts (list): Lista de partes agendadas.
-        logger: Objeto de logging.
-
-    Returns:
-        int: Número de entradas criadas.
-    """
+async def create_schedules_in_batches(scheduled_parts: List[Dict], logger) -> int:
+    """Cria entradas no cronograma em lotes."""
     task_parts_count = {}
     for part in scheduled_parts:
         task_id = part["task_id"]

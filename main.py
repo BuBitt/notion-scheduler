@@ -2,6 +2,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import datetime
 import os
+from typing import List, Tuple, Dict
 from config import Config
 from logger import setup_logger
 from notion_api import (
@@ -17,7 +18,17 @@ from collections import defaultdict
 logger = setup_logger()
 
 
-async def main():
+async def calculate_days_to_schedule(
+    tasks: List[dict], current_date: datetime.date
+) -> int:
+    return (
+        max((max(task["due_date"] for task in tasks).date() - current_date).days + 1, 1)
+        if tasks
+        else Config.DAYS_TO_SCHEDULE
+    )
+
+
+async def main() -> None:
     start_time = datetime.datetime.now()
     logger.info("Script execution started")
 
@@ -38,11 +49,7 @@ async def main():
 
     current_datetime = datetime.datetime.now(Config.LOCAL_TZ)
     current_date = current_datetime.date()
-    days_to_schedule = (
-        max((max(task["due_date"] for task in tasks).date() - current_date).days + 1, 1)
-        if tasks
-        else Config.DAYS_TO_SCHEDULE
-    )
+    days_to_schedule = await calculate_days_to_schedule(tasks, current_date)
 
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor() as pool:
@@ -83,15 +90,16 @@ async def main():
     free_hours = total_available_hours - committed_hours
     execution_time = (datetime.datetime.now() - start_time).total_seconds()
 
-    scheduled_days = len(set(part["start_time"].date() for part in scheduled_parts))
-    free_hours_per_week = {}
+    scheduled_days = len({part["start_time"].date() for part in scheduled_parts})
+    free_hours_per_week: Dict[int, float] = {}
     week_hours = defaultdict(float)
     week_committed = defaultdict(float)
+
     for slot in original_slots:
-        week_number = slot[0].isocalendar()[1]
+        week_number = slot[0].isocalendar().week
         week_hours[week_number] += (slot[1] - slot[0]).total_seconds() / 3600
     for part in scheduled_parts:
-        week_number = part["start_time"].isocalendar()[1]
+        week_number = part["start_time"].isocalendar().week
         week_committed[week_number] += (
             part["end_time"] - part["start_time"]
         ).total_seconds() / 3600
@@ -100,24 +108,25 @@ async def main():
         for week in week_hours
     }
 
-    stats = f"""
-        Estatísticas de Execução:
-        • Tarefas carregadas: {len(tasks)}
-        • Tarefas puladas: {skipped_tasks}
-        • Tarefas não agendadas: {len(unscheduled_tasks)}
-        • Inserções no banco de dados: {insertions}
-        • Horas comprometidas: {int(committed_hours)}h
-        • Horas livres restantes: {int(free_hours)}h (de {int(total_available_hours)}h no total)
-        • Dias com exceções: {exception_days_count}
-        • Slots de exceção: {exception_slots_count}
-        • Tempo de execução: {execution_time:.2f} segundos
-        • Entradas de cronograma removidas: {deleted_entries}
-        • Dias agendados: {scheduled_days}
-        • Horas livres por semana:"""
-
-    for week, hours in free_hours_per_week.items():
-        stats += f"\n\t  - Semana {week}: {hours}h"
-    logger.info(stats)
+    stats_lines = [
+        "Estatísticas de Execução:",
+        f"• Tarefas carregadas: {len(tasks)}",
+        f"• Tarefas puladas: {skipped_tasks}",
+        f"• Tarefas não agendadas: {len(unscheduled_tasks)}",
+        f"• Inserções no banco de dados: {insertions}",
+        f"• Horas comprometidas: {int(committed_hours)}h",
+        f"• Horas livres restantes: {int(free_hours)}h (de {int(total_available_hours)}h no total)",
+        f"• Dias com exceções: {exception_days_count}",
+        f"• Slots de exceção: {exception_slots_count}",
+        f"• Tempo de execução: {execution_time:.2f} segundos",
+        f"• Entradas de cronograma removidas: {deleted_entries}",
+        f"• Dias agendados: {scheduled_days}",
+        "• Horas livres por semana:",
+    ]
+    stats_lines.extend(
+        f"\t- Semana {week}: {hours}h" for week, hours in free_hours_per_week.items()
+    )
+    logger.info("\n".join(stats_lines))
 
     if unscheduled_tasks:
         logger.warning("Tarefas não agendadas:")
