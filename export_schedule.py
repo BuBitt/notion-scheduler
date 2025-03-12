@@ -109,27 +109,31 @@ class ScheduleExporter:
         """
         file_path = self.output_dir / f"schedule_{period_name}.txt"
         tasks_by_activity = {}
-        unscheduled_ids = {task["id"] for task in unscheduled_tasks}
+        unscheduled_names = {
+            task["name"] for task in unscheduled_tasks
+        }  # Usar nomes para verificar
 
-        for part in self._filter_by_period(
+        for (
+            part
+        ) in self._filter_by_period(  # Correção aqui: removido espaço e "submissions"
             scheduled_parts, start_date, end_date, "start_time"
         ):
-            activity_id = part.get("activity_id", part["task_id"])
-            tasks_by_activity.setdefault(activity_id, []).append(part)
+            activity_name = part["name"]  # Usar o nome como chave
+            tasks_by_activity.setdefault(activity_name, []).append(part)
 
         with file_path.open("w", encoding="utf-8") as f:
             f.write(
                 f"Cronograma - {period_name.replace('_', ' ').title()} ({start_date} a {end_date})\n\n"
             )
             f.write("=== Tarefas Agendadas ===\n\n")
-            for activity_id, parts in tasks_by_activity.items():
+            for activity_name, parts in tasks_by_activity.items():
                 part = parts[0]
-                activity_name = (
-                    f"[{part['name']}] (Tópico)" if part["is_topic"] else part["name"]
+                display_name = (
+                    f"[{activity_name}] (Tópico)" if part["is_topic"] else activity_name
                 )
                 status = (
                     "Agendada"
-                    if activity_id not in unscheduled_ids
+                    if activity_name not in unscheduled_names
                     else "Parcialmente Agendada"
                 )
                 due_date = (
@@ -138,7 +142,7 @@ class ScheduleExporter:
                     else "N/A"
                 )
                 f.write(
-                    f"Atividade: {activity_name}\n  ID Atividade: {activity_id}\n  ID Tópico: {part['task_id'] if part['is_topic'] else 'N/A'}\n  Status: {status}\n  Vencimento: {due_date}\n"
+                    f"Atividade: {display_name}\n  Status: {status}\n  Vencimento: {due_date}\n"
                 )
                 for p in sorted(parts, key=lambda x: x["start_time"]):
                     start, end = self.format_datetime(
@@ -159,7 +163,7 @@ class ScheduleExporter:
                         else "N/A"
                     )
                     f.write(
-                        f"Tarefa: {task['name']}\n  ID Atividade: {task.get('activity_id', 'N/A')}\n  ID Tópico: {task['id'] if task.get('is_topic', False) else 'N/A'}\n  Status: Não Agendada\n  Vencimento: {self.format_datetime(task['due_date'])}\n  Duração Estimada: {duration}\n\n"
+                        f"Tarefa: {task['name']}\n  Status: Não Agendada\n  Vencimento: {self.format_datetime(task['due_date'])}\n  Duração Estimada: {duration}\n\n"
                     )
 
             f.write(
@@ -185,14 +189,17 @@ class ScheduleExporter:
             end_date: Data final do período.
         """
         file_path = self.output_dir / f"schedule_{period_name}.md"
-        unscheduled_ids = {task["id"] for task in unscheduled_tasks}
+        unscheduled_names = {
+            task["name"] for task in unscheduled_tasks
+        }  # Usar nomes para verificar
 
         with file_path.open("w", encoding="utf-8") as f:
             f.write(
                 f"# Cronograma - {period_name.replace('_', ' ').title()} ({start_date} a {end_date})\n\n## Tarefas Agendadas\n\n"
             )
             f.write(
-                "| Atividade | Início | Fim | Duração (h) | Tópico | ID Atividade | ID Tópico | Status | Vencimento |\n|-----------|--------|-----|-------------|--------|--------------|-----------|--------|------------|\n"
+                "| Atividade | Início | Fim | Duração (h) | Tópico | Status | Vencimento |\n"
+                "|-----------|--------|-----|-------------|--------|--------|------------|\n"
             )
             for part in sorted(
                 self._filter_by_period(
@@ -205,13 +212,19 @@ class ScheduleExporter:
                     if isinstance(part["due_date"], datetime.datetime)
                     else "N/A"
                 )
+                status = (
+                    "Agendada"
+                    if part["name"] not in unscheduled_names
+                    else "Parcialmente Agendada"
+                )
                 f.write(
-                    f"| {part['name']} | {self.format_datetime(part['start_time'])} | {self.format_datetime(part['end_time'])} | {self.calculate_duration(part['start_time'], part['end_time']):.2f} | {'Sim' if part['is_topic'] else 'Não'} | {part.get('activity_id', 'N/A')} | {part['task_id'] if part['is_topic'] else 'N/A'} | {'Agendada' if part['task_id'] not in unscheduled_ids else 'Parcialmente Agendada'} | {due_date} |\n"
+                    f"| {part['name']} | {self.format_datetime(part['start_time'])} | {self.format_datetime(part['end_time'])} | {self.calculate_duration(part['start_time'], part['end_time']):.2f} | {'Sim' if part['is_topic'] else 'Não'} | {status} | {due_date} |\n"
                 )
 
             if unscheduled_tasks:
                 f.write(
-                    "\n## Tarefas Não Agendadas\n\n| Tarefa | Vencimento | Duração Estimada | ID Atividade | ID Tópico | Status |\n|--------|------------|------------------|--------------|-----------|--------|\n"
+                    "\n## Tarefas Não Agendadas\n\n| Tarefa | Vencimento | Duração Estimada | Status |\n"
+                    "|--------|------------|------------------|--------|\n"
                 )
                 for task in self._filter_by_period(
                     unscheduled_tasks, start_date, end_date, "due_date"
@@ -222,7 +235,7 @@ class ScheduleExporter:
                         else "N/A"
                     )
                     f.write(
-                        f"| {task['name']} | {self.format_datetime(task['due_date'])} | {duration} | {task.get('activity_id', 'N/A')} | {task['id'] if task.get('is_topic', False) else 'N/A'} | Não Agendada |\n"
+                        f"| {task['name']} | {self.format_datetime(task['due_date'])} | {duration} | Não Agendada |\n"
                     )
 
             f.write(
@@ -254,12 +267,12 @@ class ScheduleExporter:
             "Fim",
             "Duração (h)",
             "É Tópico",
-            "ID Atividade",
-            "ID Tópico",
             "Status",
             "Vencimento",
         ]
-        unscheduled_ids = {task["id"] for task in unscheduled_tasks}
+        unscheduled_names = {
+            task["name"] for task in unscheduled_tasks
+        }  # Usar nomes para verificar
 
         with file_path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=headers)
@@ -275,6 +288,11 @@ class ScheduleExporter:
                     if isinstance(part["due_date"], datetime.datetime)
                     else "N/A"
                 )
+                status = (
+                    "Agendada"
+                    if part["name"] not in unscheduled_names
+                    else "Parcialmente Agendada"
+                )
                 writer.writerow(
                     {
                         "Atividade": part["name"],
@@ -282,13 +300,7 @@ class ScheduleExporter:
                         "Fim": self.format_datetime(part["end_time"]),
                         "Duração (h)": f"{self.calculate_duration(part['start_time'], part['end_time']):.2f}",
                         "É Tópico": part["is_topic"],
-                        "ID Atividade": part.get("activity_id", "N/A"),
-                        "ID Tópico": part["task_id"] if part["is_topic"] else "N/A",
-                        "Status": (
-                            "Agendada"
-                            if part["task_id"] not in unscheduled_ids
-                            else "Parcialmente Agendada"
-                        ),
+                        "Status": status,
                         "Vencimento": due_date,
                     }
                 )
@@ -307,10 +319,6 @@ class ScheduleExporter:
                         "Fim": "",
                         "Duração (h)": duration,
                         "É Tópico": task.get("is_topic", False),
-                        "ID Atividade": task.get("activity_id", "N/A"),
-                        "ID Tópico": (
-                            task["id"] if task.get("is_topic", False) else "N/A"
-                        ),
                         "Status": "Não Agendada",
                         "Vencimento": self.format_datetime(task["due_date"]),
                     }
