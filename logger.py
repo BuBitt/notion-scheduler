@@ -8,18 +8,19 @@ from pathlib import Path
 
 
 def setup_logger() -> logging.Logger:
-    """Configura o logger com saída para arquivo e console."""
-    current_dir = Path(__file__).parent
-    logs_dir = current_dir / "logs"
-    logs_dir.mkdir(exist_ok=True)
+    """Configura o logger com saída para arquivo e console.
 
+    Returns:
+        Objeto Logger configurado.
+    """
+    logs_dir = Path(__file__).parent / "logs"
+    logs_dir.mkdir(exist_ok=True)
     log_file = (
         logs_dir / f"scheduler_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
 
     logger = logging.getLogger("SchedulerLogger")
     logger.setLevel(getattr(logging, Config.LOG_LEVEL))
-
     log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
     if Config.LOG_TO_FILE:

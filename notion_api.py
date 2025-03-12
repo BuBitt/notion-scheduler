@@ -1,8 +1,7 @@
 import asyncio
 from functools import wraps
 import datetime
-import unicodedata
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Tuple, Optional
 from notion_client import AsyncClient
 from config import Config
 
@@ -10,7 +9,15 @@ notion = AsyncClient(auth=Config.NOTION_API_KEY)
 
 
 def retry(max_attempts: int = 3, delay: int = 1):
-    """Decorator para retentativas em caso de falha em chamadas à API."""
+    """Decorator para retentativas em caso de falha em chamadas à API.
+
+    Args:
+        max_attempts: Número máximo de tentativas.
+        delay: Tempo inicial de espera entre tentativas (em segundos).
+
+    Returns:
+        Função decorada com lógica de retentativa.
+    """
 
     def decorator(func):
         @wraps(func)
@@ -22,7 +29,7 @@ def retry(max_attempts: int = 3, delay: int = 1):
                 except Exception as e:
                     if attempt == max_attempts - 1:
                         raise
-                    logger.warning(f"Tentativa {attempt+1} falhou: {e}")
+                    logger.warning(f"Tentativa {attempt + 1} falhou: {e}")
                     await asyncio.sleep(delay * (2**attempt))
 
         return wrapper
@@ -31,10 +38,17 @@ def retry(max_attempts: int = 3, delay: int = 1):
 
 
 def parse_date(date_str: str, logger) -> datetime.datetime:
-    """Converte string de data para datetime com timezone, preservando horário se presente."""
+    """Converte string de data para datetime com timezone, preservando horário se presente.
+
+    Args:
+        date_str: String de data no formato ISO (ex.: '2025-03-15T14:00:00').
+        logger: Objeto de log para registrar mensagens.
+
+    Returns:
+        Objeto datetime com timezone local.
+    """
     naive_date = datetime.datetime.fromisoformat(date_str.replace("Z", ""))
-    # Se não houver horário, assume meia-noite (00:00)
-    if naive_date.hour == 0 and naive_date.minute == 0 and naive_date.second == 0:
+    if naive_date.hour == naive_date.minute == naive_date.second == 0:
         logger.debug(f"Data {date_str} sem horário, assumindo 00:00")
     return (
         Config.LOCAL_TZ.localize(naive_date)
@@ -45,38 +59,76 @@ def parse_date(date_str: str, logger) -> datetime.datetime:
 
 @retry()
 async def clear_schedules_db(logger) -> int:
-    """Limpa a base de cronogramas arquivando todas as entradas."""
+    """Limpa a base de cronogramas arquivando todas as entradas.
+
+    Args:
+        logger: Objeto de log para registrar mensagens.
+
+    Returns:
+        Número de entradas removidas.
+    """
     if not Config.SCHEDULE_CLEAR_DB:
         logger.info("Limpeza da base de cronogramas desativada")
         return 0
     logger.info("Iniciando limpeza da base de cronogramas")
     response = await notion.databases.query(Config.SCHEDULES_DB_ID)
     pages = response["results"]
-    tasks = [notion.pages.update(page_id=page["id"], archived=True) for page in pages]
-    if tasks:
-        await asyncio.gather(*tasks)
+    if pages:
+        await asyncio.gather(
+            *[notion.pages.update(page_id=page["id"], archived=True) for page in pages]
+        )
     logger.info(f"Base de cronogramas limpa: {len(pages)} entradas removidas")
     return len(pages)
+
+
+async def fetch_notion_data(
+    database_id: str, filter_conditions: Optional[Dict] = None, logger=None
+) -> List[Dict]:
+    """Consulta uma base de dados do Notion com filtro opcional.
+
+    Args:
+        database_id: ID da base de dados no Notion.
+        filter_conditions: Condições de filtro para a consulta (opcional).
+        logger: Objeto de log para registrar mensagens (opcional).
+
+    Returns:
+        Lista de resultados da consulta.
+    """
+    logger.debug(f"Consultando base de dados {database_id}")
+    if filter_conditions is None:
+        response = await notion.databases.query(database_id)  # Sem filtro
+    else:
+        response = await notion.databases.query(
+            database_id, filter=filter_conditions
+        )  # Com filtro
+    return response["results"]
 
 
 @retry()
 async def get_tasks(
     topics_cache: Dict[str, List[Dict]], logger
 ) -> Tuple[List[Dict], int]:
-    """Carrega tarefas não concluídas do Notion."""
+    """Carrega tarefas não concluídas do Notion.
+
+    Args:
+        topics_cache: Cache de tópicos previamente carregados.
+        logger: Objeto de log para registrar mensagens.
+
+    Returns:
+        Tupla com lista de tarefas e número de tarefas puladas.
+    """
     tasks = []
     skipped_tasks = 0
     task_ids_seen = set()
     topic_ids_seen = set()
-    logger.debug("Consultando base de tarefas")
 
-    filter = {
+    filter_conditions = {
         "property": "Status",
         "formula": {"string": {"does_not_equal": "✅ Concluído"}},
     }
-    response = await notion.databases.query(Config.TASKS_DB_ID, filter=filter)
+    activities = await fetch_notion_data(Config.TASKS_DB_ID, filter_conditions, logger)
 
-    for activity in response["results"]:
+    for activity in activities:
         activity_id = activity["id"]
         if activity_id in task_ids_seen:
             logger.warning(f"Tarefa duplicada detectada: {activity_id}, pulando")
@@ -84,32 +136,30 @@ async def get_tasks(
         task_ids_seen.add(activity_id)
 
         properties = activity.get("properties", {})
-        name_key = "Professor"
-        title_prop = properties.get(name_key)
-        if not title_prop or "title" not in title_prop or not title_prop["title"]:
+        name = properties.get("Professor", {}).get("title", [{}])[0].get("plain_text")
+        if not name:
             logger.error(
-                f"Propriedade '{name_key}' ausente ou vazia para tarefa {activity_id}"
+                f"Propriedade 'Professor' ausente ou vazia para tarefa {activity_id}"
             )
             continue
-        name = title_prop["title"][0]["plain_text"]
 
         due_date_prop = properties.get("Data de Entrega", {}).get("date")
-        if due_date_prop is None:
+        if not due_date_prop:
             logger.warning(
                 f"Data de entrega não definida para tarefa '{name}' ({activity_id}), pulando"
             )
             skipped_tasks += 1
             continue
-        due_date = parse_date(due_date_prop["start"], logger)  # Passa o logger aqui
+        due_date = parse_date(due_date_prop["start"], logger)
 
-        duration_value = properties.get("Duração", {}).get("number")
-        if duration_value is None:
+        duration = properties.get("Duração", {}).get("number")
+        if duration is None:
             logger.warning(
                 f"Duração não definida para tarefa '{name}' ({activity_id}), pulando"
             )
             skipped_tasks += 1
             continue
-        duration = duration_value * 3600
+        duration *= 3600
 
         topics = await get_topics_for_activity(activity_id, topics_cache, logger)
         if not topics:
@@ -131,28 +181,26 @@ async def get_tasks(
                     continue
                 topic_ids_seen.add(topic_id)
 
-                topic_name_key = "Name"
-                topic_properties = topic.get("properties", {})
-                topic_title_prop = topic_properties.get(topic_name_key)
-                if (
-                    not topic_title_prop
-                    or "title" not in topic_title_prop
-                    or not topic_title_prop["title"]
-                ):
+                topic_name = (
+                    topic["properties"]
+                    .get("Name", {})
+                    .get("title", [{}])[0]
+                    .get("plain_text")
+                )
+                if not topic_name:
                     logger.error(
-                        f"Propriedade '{topic_name_key}' ausente ou vazia para tópico {topic_id}"
+                        f"Propriedade 'Name' ausente ou vazia para tópico {topic_id}"
                     )
                     continue
-                topic_name = topic_title_prop["title"][0]["plain_text"]
 
-                topic_duration_value = topic_properties.get("Duração", {}).get("number")
-                if topic_duration_value is None:
+                topic_duration = topic["properties"].get("Duração", {}).get("number")
+                if topic_duration is None:
                     logger.warning(
                         f"Duração não definida para tópico '{topic_name}' ({topic_id}), pulando"
                     )
                     skipped_tasks += 1
                     continue
-                topic_duration = topic_duration_value * 3600
+                topic_duration *= 3600
 
                 tasks.append(
                     {
@@ -174,14 +222,22 @@ async def get_tasks(
 async def get_topics_for_activity(
     activity_id: str, topics_cache: Dict[str, List[Dict]], logger
 ) -> List[Dict]:
-    """Obtém tópicos relacionados a uma atividade, excluindo concluídos."""
+    """Obtém tópicos relacionados a uma atividade, excluindo concluídos.
+
+    Args:
+        activity_id: ID da atividade no Notion.
+        topics_cache: Cache de tópicos previamente carregados.
+        logger: Objeto de log para registrar mensagens.
+
+    Returns:
+        Lista de tópicos únicos associados à atividade.
+    """
     if activity_id in topics_cache:
         logger.debug(f"Cache encontrado para tópicos da atividade {activity_id}")
         cached_topics = topics_cache[activity_id]
-        unique_topics = {topic["id"]: topic for topic in cached_topics}.values()
-        return list(unique_topics)
+        return list({topic["id"]: topic for topic in cached_topics}.values())
 
-    filter = {
+    filter_conditions = {
         "and": [
             {"property": "ATIVIDADES", "relation": {"contains": activity_id}},
             {
@@ -190,20 +246,22 @@ async def get_topics_for_activity(
             },
         ]
     }
-    logger.debug(f"Consultando tópicos para atividade {activity_id}")
-    response = await notion.databases.query(
-        database_id=Config.TOPICS_DB_ID, filter=filter
-    )
-    topics = response["results"]
-    unique_topics = {topic["id"]: topic for topic in topics}.values()
-    topics_cache[activity_id] = list(unique_topics)
+    topics = await fetch_notion_data(Config.TOPICS_DB_ID, filter_conditions, logger)
+    unique_topics = list({topic["id"]: topic for topic in topics}.values())
+    topics_cache[activity_id] = unique_topics
     logger.debug(f"Tópicos únicos carregados para {activity_id}: {len(unique_topics)}")
-    return list(unique_topics)
+    return unique_topics
 
 
 @retry()
 async def update_time_slot_day(slot_id: str, day_of_week: str, logger) -> None:
-    """Atualiza o dia da semana de um slot de tempo."""
+    """Atualiza o dia da semana de um slot de tempo no Notion.
+
+    Args:
+        slot_id: ID do slot de tempo.
+        day_of_week: Nome do dia da semana a ser atualizado.
+        logger: Objeto de log para registrar mensagens.
+    """
     try:
         await notion.pages.update(
             page_id=slot_id,
@@ -221,23 +279,28 @@ async def get_time_slots(time_slots_cache: Dict[str, List], logger) -> Tuple[
     List[Tuple[str, datetime.time, datetime.time, Optional[datetime.date]]],
     List[datetime.date],
 ]:
-    """Carrega slots de tempo do Notion e identifica dias excluídos por exceções sem horários."""
+    """Carrega slots de tempo do Notion e identifica dias excluídos por exceções sem horários.
+
+    Args:
+        time_slots_cache: Cache de slots de tempo previamente carregados.
+        logger: Objeto de log para registrar mensagens.
+
+    Returns:
+        Tupla com lista de slots de tempo e lista de datas excluídas.
+    """
     if time_slots_cache.get("slots"):
         logger.debug("Usando cache para intervalos de tempo")
-        # Assumimos que o cache não inclui dias excluídos por simplicidade; recalculamos se necessário
         return time_slots_cache["slots"], []
 
-    logger.debug("Consultando base de intervalos de tempo")
-    response = await notion.databases.query(Config.TIME_SLOTS_DB_ID)
     time_slots_data = []
-    excluded_dates = []  # Lista de datas a serem excluídas
+    excluded_dates = []
+    slots = await fetch_notion_data(
+        Config.TIME_SLOTS_DB_ID, None, logger
+    )  # Passa None como filtro
 
-    for slot in response["results"]:
+    for slot in slots:
         slot_id = slot["id"]
         properties = slot.get("properties", {})
-        day_of_week = None
-        exception_date = None
-
         exception_date_prop = properties.get("Exceções", {}).get("date")
         start_time_rich = properties.get("Hora de Início", {}).get("rich_text")
         end_time_rich = properties.get("Hora de Fim", {}).get("rich_text")
@@ -246,35 +309,25 @@ async def get_time_slots(time_slots_cache: Dict[str, List], logger) -> Tuple[
             exception_date = datetime.datetime.fromisoformat(
                 exception_date_prop["start"].replace("Z", "")
             ).date()
-            day_of_week = exception_date.strftime("%A")
-            day_of_week_portuguese = {
-                v: k.capitalize() for k, v in Config.DAY_MAP.items()
-            }.get(day_of_week)
-
-            # Verifica se há exceção sem horários de início ou fim
             if not start_time_rich or not end_time_rich:
                 logger.info(
                     f"Exceção em {exception_date} sem horários definida, dia excluído do agendamento"
                 )
                 excluded_dates.append(exception_date)
-                continue  # Pula este slot, pois o dia será excluído
-
-        if not exception_date:
-            day_prop = properties.get("Dia da Semana")
-            if not day_prop or "select" not in day_prop or not day_prop["select"]:
+                continue
+            day_of_week = exception_date.strftime("%A")
+            day_of_week_portuguese = {
+                v: k.capitalize() for k, v in Config.DAY_MAP.items()
+            }.get(day_of_week)
+        else:
+            day_prop = properties.get("Dia da Semana", {}).get("select", {})
+            if not day_prop.get("name"):
                 logger.error(
                     f"Propriedade 'Dia da Semana' ausente ou vazia para slot {slot_id}"
                 )
                 continue
-            day_of_week = day_prop["select"]["name"]
-        else:
-            day_prop = properties.get("Dia da Semana")
-            if not day_prop or "select" not in day_prop or not day_prop["select"]:
-                if day_of_week_portuguese:
-                    await update_time_slot_day(slot_id, day_of_week_portuguese, logger)
-                    day_of_week = day_of_week_portuguese
-            else:
-                day_of_week = day_prop["select"]["name"]
+            day_of_week = day_prop["name"]
+            exception_date = None
 
         if not start_time_rich or not end_time_rich:
             logger.error(f"Hora de início ou fim ausente para slot {slot_id}")
@@ -282,8 +335,12 @@ async def get_time_slots(time_slots_cache: Dict[str, List], logger) -> Tuple[
 
         start_time = datetime.time.fromisoformat(start_time_rich[0]["plain_text"])
         end_time = datetime.time.fromisoformat(end_time_rich[0]["plain_text"])
-
         time_slots_data.append((day_of_week, start_time, end_time, exception_date))
+
+        if exception_date and day_of_week_portuguese:
+            day_prop = properties.get("Dia da Semana", {}).get("select", {})
+            if not day_prop.get("name"):
+                await update_time_slot_day(slot_id, day_of_week_portuguese, logger)
 
     time_slots_cache["slots"] = time_slots_data
     logger.info(f"Intervalos de tempo carregados: {len(time_slots_data)}")
@@ -291,7 +348,6 @@ async def get_time_slots(time_slots_cache: Dict[str, List], logger) -> Tuple[
     return time_slots_data, excluded_dates
 
 
-@retry()
 async def create_schedule_entry(
     task_id: str,
     start_time: datetime.datetime,
@@ -302,7 +358,18 @@ async def create_schedule_entry(
     logger,
     part_number: Optional[int] = None,
 ) -> None:
-    """Cria uma entrada no cronograma do Notion."""
+    """Cria uma entrada no cronograma do Notion.
+
+    Args:
+        task_id: ID da tarefa ou tópico.
+        start_time: Data e hora de início do agendamento.
+        end_time: Data e hora de fim do agendamento.
+        is_topic: Indica se é um tópico ou tarefa.
+        activity_id: ID da atividade relacionada (se for tópico).
+        task_name: Nome da tarefa ou tópico.
+        logger: Objeto de log para registrar mensagens.
+        part_number: Número da parte, se dividida.
+    """
     start_time_local = (
         Config.LOCAL_TZ.localize(start_time)
         if start_time.tzinfo is None
@@ -314,19 +381,18 @@ async def create_schedule_entry(
     start_time_no_offset = start_time_local.replace(tzinfo=None).isoformat()
     end_time_no_offset = end_time_local.replace(tzinfo=None).isoformat()
 
-    task_type = ""
-    if task_name.startswith("[") and "]" in task_name:
-        task_type = task_name[: task_name.index("]") + 1]
-        task_name = task_name[task_name.index("]") + 1 :].strip()
-
-    short_name = task_name if task_name else "Tarefa sem nome"
+    task_type = (
+        task_name[: task_name.index("]") + 1]
+        if task_name.startswith("[") and "]" in task_name
+        else ""
+    )
+    short_name = (
+        task_name[len(task_type) :].strip() if task_type else task_name
+    ) or "Tarefa sem nome"
     if len(short_name) > 12:
         short_name = short_name[:12]
-
     name_with_suffix = (
-        f"{task_type}{short_name}...{part_number}"
-        if part_number
-        else f"{task_type}{short_name}"
+        f"{task_type}{short_name}{f'...{part_number}' if part_number else ''}"
     )
 
     properties = {
@@ -354,34 +420,41 @@ async def create_schedule_entry(
 
 @retry()
 async def create_schedules_in_batches(scheduled_parts: List[Dict], logger) -> int:
-    """Cria entradas no cronograma em lotes."""
-    task_parts_count = {}
-    for part in scheduled_parts:
-        task_id = part["task_id"]
-        task_parts_count[task_id] = task_parts_count.get(task_id, 0) + 1
+    """Cria entradas no cronograma em lotes.
 
-    parts_with_numbers = []
+    Args:
+        scheduled_parts: Lista de partes agendadas.
+        logger: Objeto de log para registrar mensagens.
+
+    Returns:
+        Número total de entradas criadas.
+    """
     task_part_counters = {}
+    parts_with_numbers = [
+        (part, task_part_counters.setdefault(part["task_id"], 0) + 1)
+        for part in scheduled_parts
+    ]
     for part in scheduled_parts:
-        task_id = part["task_id"]
-        task_part_counters[task_id] = task_part_counters.get(task_id, 0) + 1
-        parts_with_numbers.append((part, task_part_counters[task_id]))
+        task_part_counters[part["task_id"]] = (
+            task_part_counters.get(part["task_id"], 0) + 1
+        )
 
     for i in range(0, len(parts_with_numbers), Config.SCHEDULE_BATCH_SIZE):
         batch = parts_with_numbers[i : i + Config.SCHEDULE_BATCH_SIZE]
-        tasks = [
-            create_schedule_entry(
-                part["task_id"],
-                part["start_time"],
-                part["end_time"],
-                part["is_topic"],
-                part["activity_id"],
-                part["name"],
-                logger,
-                part_number=part_number,
-            )
-            for part, part_number in batch
-        ]
-        await asyncio.gather(*tasks)
+        await asyncio.gather(
+            *[
+                create_schedule_entry(
+                    part["task_id"],
+                    part["start_time"],
+                    part["end_time"],
+                    part["is_topic"],
+                    part["activity_id"],
+                    part["name"],
+                    logger,
+                    part_number,
+                )
+                for part, part_number in batch
+            ]
+        )
         logger.info(f"Lote de {len(batch)} entradas criado")
     return len(scheduled_parts)
