@@ -30,9 +30,12 @@ def retry(max_attempts: int = 3, delay: int = 1):
     return decorator
 
 
-def parse_date(date_str: str) -> datetime.datetime:
-    """Converte string de data para datetime com timezone."""
+def parse_date(date_str: str, logger) -> datetime.datetime:
+    """Converte string de data para datetime com timezone, preservando horário se presente."""
     naive_date = datetime.datetime.fromisoformat(date_str.replace("Z", ""))
+    # Se não houver horário, assume meia-noite (00:00)
+    if naive_date.hour == 0 and naive_date.minute == 0 and naive_date.second == 0:
+        logger.debug(f"Data {date_str} sem horário, assumindo 00:00")
     return (
         Config.LOCAL_TZ.localize(naive_date)
         if naive_date.tzinfo is None
@@ -97,7 +100,7 @@ async def get_tasks(
             )
             skipped_tasks += 1
             continue
-        due_date = parse_date(due_date_prop["start"])
+        due_date = parse_date(due_date_prop["start"], logger)  # Passa o logger aqui
 
         duration_value = properties.get("Duração", {}).get("number")
         if duration_value is None:
@@ -214,17 +217,20 @@ async def update_time_slot_day(slot_id: str, day_of_week: str, logger) -> None:
 
 
 @retry()
-async def get_time_slots(
-    time_slots_cache: Dict[str, List], logger
-) -> List[Tuple[str, datetime.time, datetime.time, Optional[datetime.date]]]:
-    """Carrega slots de tempo do Notion."""
+async def get_time_slots(time_slots_cache: Dict[str, List], logger) -> Tuple[
+    List[Tuple[str, datetime.time, datetime.time, Optional[datetime.date]]],
+    List[datetime.date],
+]:
+    """Carrega slots de tempo do Notion e identifica dias excluídos por exceções sem horários."""
     if time_slots_cache.get("slots"):
         logger.debug("Usando cache para intervalos de tempo")
-        return time_slots_cache["slots"]
+        # Assumimos que o cache não inclui dias excluídos por simplicidade; recalculamos se necessário
+        return time_slots_cache["slots"], []
 
     logger.debug("Consultando base de intervalos de tempo")
     response = await notion.databases.query(Config.TIME_SLOTS_DB_ID)
     time_slots_data = []
+    excluded_dates = []  # Lista de datas a serem excluídas
 
     for slot in response["results"]:
         slot_id = slot["id"]
@@ -233,6 +239,9 @@ async def get_time_slots(
         exception_date = None
 
         exception_date_prop = properties.get("Exceções", {}).get("date")
+        start_time_rich = properties.get("Hora de Início", {}).get("rich_text")
+        end_time_rich = properties.get("Hora de Fim", {}).get("rich_text")
+
         if exception_date_prop and exception_date_prop["start"]:
             exception_date = datetime.datetime.fromisoformat(
                 exception_date_prop["start"].replace("Z", "")
@@ -241,6 +250,14 @@ async def get_time_slots(
             day_of_week_portuguese = {
                 v: k.capitalize() for k, v in Config.DAY_MAP.items()
             }.get(day_of_week)
+
+            # Verifica se há exceção sem horários de início ou fim
+            if not start_time_rich or not end_time_rich:
+                logger.info(
+                    f"Exceção em {exception_date} sem horários definida, dia excluído do agendamento"
+                )
+                excluded_dates.append(exception_date)
+                continue  # Pula este slot, pois o dia será excluído
 
         if not exception_date:
             day_prop = properties.get("Dia da Semana")
@@ -259,8 +276,6 @@ async def get_time_slots(
             else:
                 day_of_week = day_prop["select"]["name"]
 
-        start_time_rich = properties.get("Hora de Início", {}).get("rich_text")
-        end_time_rich = properties.get("Hora de Fim", {}).get("rich_text")
         if not start_time_rich or not end_time_rich:
             logger.error(f"Hora de início ou fim ausente para slot {slot_id}")
             continue
@@ -272,7 +287,8 @@ async def get_time_slots(
 
     time_slots_cache["slots"] = time_slots_data
     logger.info(f"Intervalos de tempo carregados: {len(time_slots_data)}")
-    return time_slots_data
+    logger.info(f"Dias excluídos por exceções sem horários: {len(excluded_dates)}")
+    return time_slots_data, excluded_dates
 
 
 @retry()

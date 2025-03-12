@@ -43,7 +43,8 @@ async def main() -> None:
         time_slots_cache_file, "time_slots_cache", logger
     )
 
-    (tasks, skipped_tasks), time_slots_data = await asyncio.gather(
+    # Recebe os slots e as datas excluídas
+    (tasks, skipped_tasks), (time_slots_data, excluded_dates) = await asyncio.gather(
         get_tasks(topics_cache, logger), get_time_slots(time_slots_cache, logger)
     )
 
@@ -53,6 +54,7 @@ async def main() -> None:
 
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor() as pool:
+        # Passa as datas excluídas para generate_available_slots
         available_slots, exception_days_count, exception_slots_count = (
             await loop.run_in_executor(
                 pool,
@@ -60,6 +62,7 @@ async def main() -> None:
                 time_slots_data,
                 logger,
                 days_to_schedule,
+                excluded_dates,
             )
         )
         scheduled_parts, original_slots, remaining_slots, unscheduled_tasks = (
@@ -118,6 +121,7 @@ async def main() -> None:
         f"• Horas livres restantes: {int(free_hours)}h (de {int(total_available_hours)}h no total)",
         f"• Dias com exceções: {exception_days_count}",
         f"• Slots de exceção: {exception_slots_count}",
+        f"• Dias excluídos por exceções sem horários: {len(excluded_dates)}",
         f"• Tempo de execução: {execution_time:.2f} segundos",
         f"• Entradas de cronograma removidas: {deleted_entries}",
         f"• Dias agendados: {scheduled_days}",

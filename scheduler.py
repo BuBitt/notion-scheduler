@@ -7,8 +7,12 @@ def generate_available_slots(
     time_slots_data: List[Tuple[str, datetime.time, datetime.time, datetime.date]],
     logger,
     days_to_schedule: int,
+    excluded_dates: List[datetime.date] = None,
 ) -> Tuple[List[Tuple[datetime.datetime, datetime.datetime]], int, int]:
-    """Gera slots disponíveis com base nos dados de time slots."""
+    """Gera slots disponíveis com base nos dados de time slots, excluindo datas específicas."""
+    if excluded_dates is None:
+        excluded_dates = []
+
     available_slots = []
     current_datetime = datetime.datetime.now(Config.LOCAL_TZ)
     current_date = current_datetime.date()
@@ -23,6 +27,8 @@ def generate_available_slots(
         day_name, start_time, end_time, exception_date = slot
         day_name_en = Config.DAY_MAP.get(day_name.lower())
         if exception_date:
+            if exception_date in excluded_dates:
+                continue  # Ignora slots de datas excluídas
             exception_slots_by_day.setdefault(exception_date, []).append(
                 (
                     Config.LOCAL_TZ.localize(
@@ -42,6 +48,9 @@ def generate_available_slots(
     exception_slots_count = 0
     for day in range(days_to_schedule):
         date = current_date + datetime.timedelta(days=day)
+        if date in excluded_dates:
+            logger.debug(f"Dia {date} excluído do agendamento por exceção sem horários")
+            continue  # Pula dias excluídos
         day_name_en = date.strftime("%A")
         if date in exception_slots_by_day:
             exception_days.add(date)
@@ -80,16 +89,21 @@ def schedule_part(
     task_parts = []
     scheduled = False
 
+    # Verifica se due_date_end tem horário específico (não é apenas meia-noite)
+    has_specific_time = (
+        due_date_end.hour != 0 or due_date_end.minute != 0 or due_date_end.second != 0
+    )
+
     for i, (slot_start, slot_end) in enumerate(available_slots):
-        if (
-            slot_start.date() == due_date_end.date()
-            or slot_end.date() == due_date_end.date()
-        ):
+        # Se não há horário específico, exclui completamente o dia da entrega
+        if not has_specific_time and slot_start.date() == due_date_end.date():
             continue
+
+        # Se há horário específico, permite agendamento antes dele
         if slot_start >= due_date_end:
             continue
         if slot_end > due_date_end:
-            slot_end = due_date_end
+            slot_end = due_date_end  # Ajusta o fim do slot para não ultrapassar a hora de entrega
 
         available_time = (slot_end - slot_start).total_seconds()
         if available_time <= 0:
@@ -106,6 +120,7 @@ def schedule_part(
                 "is_topic": task["is_topic"],
                 "activity_id": task.get("activity_id"),
                 "name": task["name"],
+                "due_date": due_date_end,  # Inclui due_date para referência
             }
         )
         remaining_duration -= part_duration
@@ -152,7 +167,8 @@ def schedule_tasks(
             continue
 
         remaining_duration = task["duration"]
-        due_date_end = task["due_date"].replace(hour=23, minute=59, second=59)
+        # Usa a due_date diretamente, sem forçar 23:59:59, para respeitar horário específico
+        due_date_end = task["due_date"]
         task_parts = []
 
         while remaining_duration > 0:
