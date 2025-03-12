@@ -92,7 +92,7 @@ def schedule_part(
     remaining_duration: float,
     due_date_end: datetime.datetime,
     logger,
-) -> Tuple[List[Dict], float, bool]:
+) -> Tuple[List[Dict], float, bool, Optional[str]]:
     """Agenda uma parte de uma tarefa em um slot disponível.
 
     Args:
@@ -103,7 +103,7 @@ def schedule_part(
         logger: Objeto de log para registrar mensagens.
 
     Returns:
-        Tupla com partes agendadas, duração restante e flag de sucesso.
+        Tupla com partes agendadas, duração restante, flag de sucesso e motivo da falha (se aplicável).
     """
     MAX_PART_DURATION = Config.MAX_PART_DURATION_HOURS * 3600
     REST_DURATION = Config.REST_DURATION_HOURS * 3600
@@ -115,9 +115,9 @@ def schedule_part(
 
     for i, (slot_start, slot_end) in enumerate(available_slots):
         if not has_specific_time and slot_start.date() == due_date_end.date():
-            continue
+            continue  # Evita agendar no mesmo dia sem horário específico
         if slot_start >= due_date_end:
-            continue
+            continue  # Slot começa após o vencimento
         if slot_end > due_date_end:
             slot_end = due_date_end
 
@@ -148,9 +148,7 @@ def schedule_part(
                 if rest_end < slot_end:
                     available_slots[i] = (rest_end, slot_end)
                 else:
-                    del available_slots[
-                        i
-                    ]  # Remove o slot se não houver espaço suficiente após o descanso
+                    del available_slots[i]
             else:
                 available_slots[i] = (part_end, slot_end)
         else:
@@ -159,7 +157,30 @@ def schedule_part(
         scheduled = True
         break
 
-    return task_parts, remaining_duration, scheduled
+    # Determina o motivo da falha, se não agendado
+    reason = None
+    if not scheduled:
+        current_time = datetime.datetime.now(Config.LOCAL_TZ)
+        if not available_slots:
+            reason = "Nenhum slot disponível antes do vencimento"
+        elif all(slot[0] >= due_date_end for slot in available_slots):
+            reason = "Todos os slots disponíveis estão após o vencimento"
+        elif not has_specific_time and all(
+            slot[0].date() == due_date_end.date() for slot in available_slots
+        ):
+            reason = "Slots disponíveis apenas no mesmo dia do vencimento (sem horário específico)"
+        elif all(
+            (slot[1] - slot[0]).total_seconds() < remaining_duration
+            for slot in available_slots
+            if slot[0] < due_date_end
+        ):
+            reason = "Slots disponíveis têm duração insuficiente"
+        elif due_date_end <= current_time:
+            reason = "Data de vencimento já passou"
+        else:
+            reason = "Motivo desconhecido"
+
+    return task_parts, remaining_duration, scheduled, reason
 
 
 def schedule_tasks(
@@ -172,7 +193,7 @@ def schedule_tasks(
     List[Tuple[datetime.datetime, datetime.datetime]],
     List[Dict],
 ]:
-    """Agenda tarefas em slots disponíveis, retornando partes não agendadas.
+    """Agenda tarefas em slots disponíveis, retornando partes não agendadas com motivo.
 
     Args:
         tasks: Lista de tarefas a serem agendadas.
@@ -195,22 +216,26 @@ def schedule_tasks(
         remaining_duration = task["duration"]
         due_date_end = task["due_date"]
         task_parts = []
+        unscheduled_reason = None
 
         while remaining_duration > 0:
-            parts, remaining_duration, scheduled = schedule_part(
+            parts, remaining_duration, scheduled, reason = schedule_part(
                 task, available_slots, remaining_duration, due_date_end, logger
             )
             task_parts.extend(parts)
             if not scheduled:
                 logger.warning(
-                    f"Could not schedule task '{task['name']}' before {task['due_date']}"
+                    f"Could not schedule task '{task['name']}' before {task['due_date']} - Reason: {reason}"
                 )
-                unscheduled_tasks.append(task)
+                unscheduled_reason = reason
                 break
 
         if task_parts:
             scheduled_parts.extend(task_parts)
             tasks_scheduled.add(task_id)
+        if unscheduled_reason:
+            task["unscheduled_reason"] = unscheduled_reason
+            unscheduled_tasks.append(task)
 
     logger.info(f"Scheduled {len(scheduled_parts)} parts")
     return scheduled_parts, original_slots, available_slots, unscheduled_tasks

@@ -213,7 +213,10 @@ async def main() -> None:
     if unscheduled_tasks:
         logger.warning("Tarefas não agendadas:")
         for task in unscheduled_tasks:
-            logger.warning(f" - {task['name']} (Vencimento: {task['due_date']})")
+            reason = task.get("unscheduled_reason", "Motivo não especificado")
+            logger.warning(
+                f" - {task['name']} (Vencimento: {task['due_date']}, Motivo: {reason})"
+            )
 
     logger.info("Execução do script concluída")
 
