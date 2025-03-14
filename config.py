@@ -15,7 +15,7 @@ class DayOfWeek(Enum):
     QUARTA = "Wednesday"
     QUINTA = "Thursday"
     SEXTA = "Friday"
-    SABADO = "Saturday"
+    SÁBADO = "Saturday"
     DOMINGO = "Sunday"
 
 
